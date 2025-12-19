@@ -1,0 +1,3320 @@
+---
+title: "Clean raw data updated to 2025-09-08"
+output: html_document
+---
+#load packages
+```{r}
+rm(list = ls())
+suppressPackageStartupMessages({
+  require(pacman)
+  pacman::p_load(openxlsx,
+                 data.table,
+                 magrittr,
+                 dplyr,
+                 rlang,
+                 countrycode,
+                 lubridate,
+                 purrr,
+                 stringr)
+})
+```
+# Define working directory
+```{r}
+wd <- "./"
+setwd(wd)
+```
+# Import raw data
+```{r}
+path <- "data/raw data/"
+fileNames <- dir(path)
+filePath <- sapply(fileNames, 
+                   function(x){paste(path, x, sep = '/')})
+# The sequence from data[[1]] to data[[10]] is as follows: 
+# F01, F02, F03, F04, F07a, F07b, F07c, F07d, F07e, F07m.
+data <- lapply(filePath, function(x){fread(x, fill = TRUE)})
+# Anti group
+anti <- read.xlsx("data/anti group/anti_group_used.xlsx")
+org_anti_class <- read.xlsx("data/anti group/organism_group.xlsx") 
+
+###
+# Loop through the first 10 elements of data, convert to data frames and convert IDate columns to Date
+for (i in 1:10) {
+  # Convert the current element to a data frame
+  data[[i]] <- as.data.frame(data[[i]])
+  
+  # Convert all IDate columns to Date in the current data frame
+  data[[i]] <- data[[i]] %>%
+    mutate(across(where(~ inherits(.x, "IDate")), ~ as.Date(.x)))
+}
+```
+# Revise redcap_repeat_instance 2 ~ 1 due to delete
+```{r}
+revise_dele <- which((data[[2]]$recordid %in% c("BN-001-A0-0002", "MY-004-A0-0095", "PK-001-A0-0033")) & (data[[2]]$redcap_event_name == "bsi_episode_arm_1"))
+
+data[[2]]$redcap_repeat_instance[revise_dele] <- 1
+
+```
+# Divide three groups (infection types)
+```{r}
+#####
+# VAP
+# Hospital-acquired BSI 
+# If not transfer: inf_onset-hpd_adm_date>2days; 
+# If transfer: inf_onset-hpd_hosp_date>2days 
+# Healthcare-associated BSI 
+# If not transfer:inf_onset-hpd_adm_date<=2days;
+# If transfer:inf_onset-hpd_hosp_date<=2days
+#####
+## VAP
+vap_onset_data <- data[[6]]
+vap_onset_data$infection_types <- "VAP"
+## BSI
+# hpd_hosp_date
+baseline_hosp <- data[[1]] %>% 
+  select("recordid", "hpd_hosp_date", "hpd_adm_date")
+# Combine hpd_hosp_date, hpd_adm_date, and inf_onset
+bsi_onset_data <- left_join(data[[5]], baseline_hosp, by = "recordid")
+#
+bsi_onset <- as.Date(bsi_onset_data$inf_onset, format = "%Y-%m-%d")
+bsi_adm <- as.Date(bsi_onset_data$hpd_adm_date, format = "%Y-%m-%d")
+bsi_hosp <- as.Date(bsi_onset_data$hpd_hosp_date, format = "%Y-%m-%d")
+# The difference between dates 
+adm_diff <- difftime(bsi_onset, bsi_adm, units = "days")
+hosp_diff <- difftime(bsi_onset, bsi_hosp, units = "days")
+# Hospital-acquired BSI
+bsi_onset_data$infection_types[(adm_diff > 2) | (hosp_diff > 2)] <- "Hospital-acquired BSI"
+# Healthcare-associated BSI
+bsi_onset_data$infection_types[(adm_diff <= 2) | (hosp_diff <= 2)] <- "Healthcare-associated BSI"
+###
+# Index onset date of vap or bsi
+vap_index <- vap_onset_data[(which(vap_onset_data$redcap_repeat_instance == 1)),]
+bsi_index <- bsi_onset_data[(which(bsi_onset_data$redcap_repeat_instance == 1)),]
+# Earlier infection onset date
+df_vap_index <- vap_index %>% 
+  select("recordid", "inf_onset2", "infection_types")
+
+df_bsi_index <- bsi_index %>% 
+  select("recordid", "inf_onset", "infection_types")
+
+# 
+combined_df_ori <- bind_rows(df_vap_index, df_bsi_index) %>%
+  mutate(combined_onset = coalesce(inf_onset2, inf_onset)) %>% 
+  select(-inf_onset2, -inf_onset) %>% 
+  rename(inf_onset = combined_onset) %>%
+  filter(!is.na(infection_types))
+
+# -----------------------------
+# Check the duplicate
+# Find recordids with duplicate combined_onset
+duplicate_recordids <- combined_df_ori %>%
+  group_by(recordid, inf_onset) %>%
+  filter(n() > 1) %>%
+  distinct(recordid) %>%
+  pull(recordid)
+
+# Extract rows from the original dataframe where these recordid occur
+duplicate_rows <- combined_df_ori %>%
+  filter(recordid %in% duplicate_recordids) %>%
+  arrange(recordid, inf_onset)
+
+```
+# AST
+```{r}
+# AST result
+ast_results <- data[[10]] %>% 
+  select(starts_with("susceptibility_")) %>%
+  mutate(across(everything(), as.numeric))
+
+# Replace NA
+ast_results[is.na(ast_results)] <- 5
+
+# Add other variables
+ast_add <- data[[10]] %>% 
+  select("recordid", "org", "org_oth",
+         "f07m_bsic", "f07m_vapc", 
+         "ast_date", "spec_date", 
+         "f07m_hpd_adm_date_1", "f07m_hpd_adm_date_2",
+         "redcap_repeat_instance")
+
+# Define the organism names
+org_names <- c("E. coli", "K. pneumoniae", "Acinetobacter spp.", "Pseudomonas spp.",
+               "Serratia", "Proteus", "Morganella", "Enterobacter",
+               "Stenotrophomonas spp.", "S. aureus", "Enterococcus spp.", 
+               "S. pneumoniae", "Candida spp.", "Others")
+
+# Add the organism names to the ast_add dataframe
+ast_add$org_names <- factor(ast_add$org, levels = 1:14, labels = org_names)
+
+# Add other names
+ast_add$org_names_all <- ifelse(ast_add$org_names == "Others", ast_add$org_oth, as.character(ast_add$org_names))
+
+# 
+name_mapping <- c(
+"A.baumannii" = "Acinetobacter spp.",
+"acinetobacter baummanii" = "Acinetobacter spp.",
+"Acinetobacter nosocomialis" = "Acinetobacter spp.",
+"Acinetobactor" = "Acinetobacter spp.",
+"ABIOTROPHIA DEFECTIVA" = "Abiotrophia",                                      
+"Achromobacter" = "Achromobacter",                                                
+"ACHROMOBACTER DENTRIFICANS" = "Achromobacter",
+"achromobacter denitrificans" = "Achromobacter",
+"Achromobacter species" = "Achromobacter",                                        
+"Achromobacter spp" = "Achromobacter",                                   
+"Achromobacter xylosoxidans" = "Achromobacter",                         
+"Achromobacter xylosoxidans " = "Achromobacter",                          
+"Achromobacter xylosoxodans" = "Achromobacter",               
+"Achromobacter xyloxosidans" = "Achromobacter",
+"Achromobacter mucicolens" = "Achromobacter",
+"Achromobacter xylosoxidans ss dentrificans" = "Achromobacter",
+"acinetobacter baumannii" = "Acinetobacter spp.",                     
+"acinetobacter lwoffii" = "Acinetobacter spp.",                        
+"acinetobactor baumani complex" = "Acinetobacter spp.", 
+"Acinetobacter Nosocomial " = "Acinetobacter spp.", 
+"ACINOBACTER IWOFPII" = "Acinetobacter spp.",
+"Acinetobacter junii" = "Acinetobacter spp.",
+"acromonas hydrophilia&Klebsiella oxytoca" = "Aeromonas",                         
+"Actinomyces odontolyticus" = "Actinomyces",                                      
+"Aerobic Actinomycetes" = "Actinomyces",
+"aeromanas" = "Aeromonas",
+"Aeromonas caviae" = "Aeromonas",                                                 
+"Aeromonas caviae complex" = "Aeromonas",                                         
+"aeromonas hydrophila" = "Aeromonas",                                             
+"Aeromonas hydrophila" = "Aeromonas",                                              
+"Aeromonas hydrophila complex" = "Aeromonas",                                     
+"Aeromonas hydrophila/caviae 1" = "Aeromonas",                                    
+"Aeromonas hydrophila/caviae 2" = "Aeromonas",
+"Aeromonas hydrophilacaviae" = "Aeromonas",
+"Aeromonas hydrophili complex" = "Aeromonas",
+"aeromanas hydrophila complex" = "Aeromonas",
+"AEROMONAS HYDROPHILIA" = "Aeromonas",                                            
+"Aeromonas punctata " = "Aeromonas",                                              
+"Aeromonas punctata (caviae)" = "Aeromonas",                                      
+"Aeromonas sp." = "Aeromonas",                                                    
+"Aeromonas species" = "Aeromonas",                                                
+"AEROMONAS SPECIES" = "Aeromonas", 
+"Aeromonas sobria" = "Aeromonas", 
+"Aeromonas veronii" = "Aeromonas",                                                
+"AEROMONAS VERONII" = "Aeromonas",
+"Aeromonas veronii biovar. sobria" = "Aeromonas",                                 
+"Aeromonas veronii bv sobria" = "Aeromonas",
+"Aeromonas veronii complex" = "Aeromonas",
+"A.hydrophilalcaviae" = "Aeromonas",
+"Aeromonas hydrophia/caviae" = "Aeromonas",
+"AEROCOCCUS VIRIDANS" = "Aerococcus",
+"AEROCOCCUS URINAE" = "Aerococcus",
+
+" Agrobacterium radiobacter" = "Agrobacterium", 
+"Agrobacterium radiobacter" = "Agrobacterium", 
+"Anaerococcus prevottii" = "Anaerococcus",                                         
+"ANTROBACTER FECUNDIL" = NA,                                                      
+"Arthrobacter spp" = "Arthrobacter",                                              
+"Aspergillus spp" = "Aspergillus",
+"Aspergillus fumigatus " = "Aspergillus",
+"Aspergillus fumigatus complex" = "Aspergillus",
+
+"B. cepaciae" = "Burkholderia",                                                         
+"Bacillus cereus" = "Bacillus",                                                   
+"Bacillus cereus group" = "Bacillus",                                             
+"bacillus species" = "Bacillus",                                                  
+"Bacillus species" = "Bacillus",                                                  
+"Bacillus spp." = "Bacillus",                                                     
+"BACILLUS SUBTILIS" = "Bacillus",
+"BACILLUS CEREUS (X2 SITES)" = "Bacillus",
+"Bacillus cereus/thuringiensis/mycoides" = "Bacillus",
+
+"Bacteroides fragilis group" = "Bacteroides",
+"Bacteroides fragilis" = "Bacteroides",
+"BACTEROIDES FRAGILIS" = "Bacteroides",
+"BACTEROIDES SALYERSIAE" = "Bacteroides",                                          
+"Bacteroides thetaiotaomicron" = "Bacteroides",
+"Bacteroides caccae" = "Bacteroides",
+"Bipolaris cactivora" = "Bipolaris",                                        
+"Blinkholderia gladioli" = NA,
+
+"Bulcoldoria Cepace complex" = "Burkholderia",
+"Bukholderia cenocepacia" = "Burkholderia",                                        
+"Bukholderia cepacia" = "Burkholderia",                                            
+"Bukholderia contaminans" = "Burkholderia",                                        
+"Bulkhoderia cepacia" = "Burkholderia",                           
+"Bulkhoderia cepacia complex" = "Burkholderia",
+"Burkholderia Cepacciae Complex " = "Burkholderia",
+
+"Bulkhoderia gladioli" = NA,                                                       
+"Burkhoderia cepacia complex" = "Burkholderia",                                    
+"Burkholdeeria cepacia" = "Burkholderia",                                          
+"BURKHOLDENA CEPACIA" = "Burkholderia",                                            
+"Burkholderia" = "Burkholderia",                                                   
+"Burkholderia cenocepacia" = "Burkholderia",                                       
+"burkholderia cepacia" = "Burkholderia",                                           
+"Burkholderia cepacia" = "Burkholderia",                                           
+"Burkholderia Cepacia" = "Burkholderia",                                           
+"Burkholderia cepacia " = "Burkholderia",                                          
+"Burkholderia cepacia complex" = "Burkholderia",                                   
+"BURKHOLDERIA CEPACIA COMPLEX" = "Burkholderia",                                   
+"Burkholderia cepacia group" = "Burkholderia",                                     
+"Burkholderia contaminans" = "Burkholderia",                                       
+"Burkholderia multivorans" = "Burkholderia",                                       
+"Burkhuldena cepacia" = "Burkholderia", 
+"Burkolderia cepacia" = "Burkholderia",
+"Burkoderia cepacia complex" = "Burkholderia",                                     
+"Burkulderia Cepecia" = "Burkholderia",
+"Burkholderia Cepacea Complex" = "Burkholderia",            
+"Burkholderia Metalica " = "Burkholderia",                   
+"Burkholderia Cepaciae Complex " = "Burkholderia",            
+"Bukholderia Cepacia Complex" = "Burkholderia",              
+"Burkholderia Cepacie Complex" = "Burkholderia",             
+"Buurkholderia Cepacia Complex " = "Burkholderia",
+"BUAKHOLDERIA  CEPACIA" = "Burkholderia",
+
+"Bukholderia pseudomallei" = NA,
+
+"BURICHOLDERIA CEPACIA " = "Burkholderia",
+
+"PANDOSEA S/P" = "Pandoraea", 
+"PANDORAEA S/P" = "Pandoraea",
+
+"candida abricans" = "Candida spp.",
+"CANDIDA GLABRATA" = "Candida spp.",
+"CANDIDA ALBICANS" = "Candida spp.",
+" Pichia kudriavzevii" = "Candida spp.",
+
+"Chromobacterium violaceum" = "Chromobacterium",
+"Chromobactrereium violaceum" = "Chromobacterium",
+"Chryseobacterium arthosphaerae" = "Chryseobacterium",                             
+"Chryseobacterium arthrosphaerae" = "Chryseobacterium",                            
+"Chryseobacterium gleum" = "Chryseobacterium",                                     
+"chryseobacterium indologenes" = "Chryseobacterium",                               
+"Chryseobacterium indologenes" = "Chryseobacterium", 
+"Chryseobacterium indologines" = "Chryseobacterium",
+"Chryseobacterium Indologenes" = "Chryseobacterium",
+"Chryseobacterium indolegenes" = "Chryseobacterium",
+"Indologenes" = "Chryseobacterium",
+"Chryseobacterium species" = "Chryseobacterium",                                   
+"CHRYSEOBACTERIUM SPECIES" = "Chryseobacterium",                                   
+"Chryseobacterium spp" = "Chryseobacterium",
+
+"CITIOBACTER FREUNDII" = "Citrobacter",                                            
+"citrobacter" = "Citrobacter",                                                     
+"Citrobacter freundi" = "Citrobacter",                                             
+"Citrobacter freundii" = "Citrobacter",                                            
+"Citrobacter freundii complex" = "Citrobacter",                                    
+"citrobacter fruendii" = "Citrobacter",
+"Citrobacter freundii (CRE)" = "Citrobacter",
+"Citrobacter koseri" = "Citrobacter",                                              
+"Citrobacter Koseri" = "Citrobacter",                                              
+"CITROBACTER KOSERI" = "Citrobacter",                                              
+"Citrobacter koseri " = "Citrobacter",                                             
+"Citrobacter species ( braakii)" = "Citrobacter",
+"Citrobacter Species" = "Citrobacter",
+"Citrobacter spp." = "Citrobacter",
+"Citrobacter wrekmanii" = "Citrobacter",
+"Citrobacter Braaki" = "Citrobacter",
+
+"Clostridium innocuum" = "Clostridium",                                            
+"Clostridium species" = "Clostridium",                                             
+"clostridium tertium" = "Clostridium",                                             
+"Clostridium tertium" = "Clostridium",    
+
+"coagulase negative staphylococci" = "Coagulase-negative staphylococci (CoNS)",
+"coagulase negative staphylococci (CONS)" = "Coagulase-negative staphylococci (CoNS)",
+"Coagulase negative staphylococci (CONS)" = "Coagulase-negative staphylococci (CoNS)",
+"Coagulase Negative Staphylococci (CONS)" = "Coagulase-negative staphylococci (CoNS)",
+"coagulase negative staphylococcus" = "Coagulase-negative staphylococci (CoNS)",  
+"Coagulase negative staphylococcus haemolyticus" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus coagulase negative" = "Coagulase-negative staphylococci (CoNS)",
+
+"Comamonas kerstersii" = "Comamonas",                                              
+"Comamonas testosteroni" = "Comamonas",                                            
+"Comamonas testosteroni 2" = "Comamonas",                                          
+"Comamonas testosteroni 3" = "Comamonas",                                          
+"corynebacterium" = "Corynebacterium",                                             
+"Corynebacterium amycolatum" = "Corynebacterium",  
+"Corynebacterium afermentans" = "Corynebacterium",
+"Corynebacterium jeikeium" = "Corynebacterium",                                    
+"Corynebacterium pseudodiphtheriticum" = "Corynebacterium",                        
+"Corynebacterium sp." = "Corynebacterium",                                         
+"Corynebacterium species" = "Corynebacterium",                                     
+"Corynebacterium spp" = "Corynebacterium",                                         
+"Corynebacterium spp." = "Corynebacterium",                                        
+"Corynebacterium stratium" = "Corynebacterium",                                    
+"corynebacterium striatum" = "Corynebacterium",                                    
+"Corynebacterium striatum" = "Corynebacterium",                                    
+"Corynebacterium Striatum" = "Corynebacterium",                                    
+"coynebacterium species " = "Corynebacterium",
+"Corynebacterium propinquum" = "Corynebacterium",
+"corynebecter striatum" = "Corynebacterium",
+"CORYNEBACTERIUM RESISTENS" = "Corynebacterium", 
+
+"Cronobacter sp." = "Cronobacter",                                                
+"Cryptococcus laurentii" = "Cryptococcus",
+"Cryptococcus neofarmans" = "Cryptococcus",
+"Cutibacterium acnes" = "Cutibacterium", 
+"Cupriavidus pauculus" = "Cupriavidus",
+
+"Diphtheroids" = "Corynebacterium",                                                                     
+"Edwardsiella tarda" = "Edwardsiella",                                                
+"Eggerthella lenta " = "Eggerthella",
+"Eggerthella lenta" = "Eggerthella",
+
+"Elizabethkingia" = "Elizabethkingia",                                             
+"Elizabethkingia miricola" = "Elizabethkingia",                                    
+"Elizabethkingia anophelis" = "Elizabethkingia",                                   
+"Elizabethkingia anophelis " = "Elizabethkingia",                                  
+"Elizabethkingia meningoseptica" = "Elizabethkingia",                              
+"ELIZABETHKINGIA SP." = "Elizabethkingia",                                         
+"Elizabethkingia species" = "Elizabethkingia",                                     
+"ELIZABETHKINGIA SPECIES" = "Elizabethkingia",                                     
+"Elizabethkingid meningoseptica" = "Elizabethkingia",
+"Elizabethkingia meningeseptica" = "Elizabethkingia",
+"ELIZABERTKINGIA MENINGOSEPTICA" = "Elizabethkingia",
+"Elizabethkingia spp" = "Elizabethkingia",
+"Elizabethkingae meningoseptica" = "Elizabethkingia",
+
+"Enterococcus faecium" = "Enterococcus spp.",                                           
+"Enterococus faecium" = "Enterococcus spp.",
+"Escherichia fergusonii" = "Escherichia",                                                         
+"Flavobacterium" = "Flavobacterium",
+"FUSOBACTERIUM" = "Fusobacterium", 
+"FUSOBACTERIUM VARIUM" = "Fusobacterium",
+"Fusobacterium species" = "Fusobacterium",                                         
+"Gemella morbillorum" = "Gemella",                                                 
+"GEMELLA SANGUINIS" = "Gemella",
+"Gemella spp." = "Gemella",
+
+"Granulicatella species" = "Granulicatella",                                          
+"GROUP G STREPTOCOCCUS" = "Streptococcus",                                                           
+"Haemophilus influenza" = "Haemophilus",                                           
+"Haemophilus influenza " = "Haemophilus",                                          
+"Haemophilus influenzae" = "Haemophilus",                                          
+"Haemophilus Influenzae" = "Haemophilus", 
+"Haemophylus influenzae" = "Haemophilus", 
+"H.influenzae" = "Haemophilus",
+"Haemophilus parainfluenza" = "Haemophilus",
+"Halomonas (Alcaligenes) aquamarinus" = "Halomonas",
+
+"Klebisela Oxitoca " = "Klebsiella",                                               
+"KLEBISELA OXITOCA " = "Klebsiella",
+"Klebsiella Oxytocae" = "Klebsiella",
+"Klebisella aerogenes" = "Klebsiella",                                                
+"klebisiella pneumonaie" = "K. pneumoniae",                                   
+"Klebseilla aerogenes" = "Klebsiella",
+"Kebsiella aerogenes" = "Klebsiella",
+"Klebsiella" = "Klebsiella",                                                       
+"Klebsiella  aerogenes" = "Klebsiella",                                            
+"klebsiella  oxytoca"  = "Klebsiella",                                             
+"klebsiella aerogenes" = "Klebsiella",                                             
+"Klebsiella aerogenes" = "Klebsiella",                                             
+"Klebsiella Aerogenes" = "Klebsiella",                                             
+"KLEBSIELLA AEROGENES" = "Klebsiella",                                             
+"Klebsiella aerogenes " = "Klebsiella",                                            
+"Klebsiella aerogenes  "  = "Klebsiella",
+"Kelbsiella aerogenes" = "Klebsiella",
+"Klebsiella aerogenes (CRE, MDR)" = "Klebsiella",                                  
+"Klebsiella aerogens" = "Klebsiella",                                              
+"klebsiella aeroginosa" = "Klebsiella",                                            
+"klebsiella arogenes" = "Klebsiella",                                              
+"klebsiella oxytoca" = "Klebsiella",                                               
+"Klebsiella oxytoca" = "Klebsiella",                                               
+"Klebsiella Oxytoca" = "Klebsiella",
+"K.oxytoca" = "Klebsiella",
+"KLEBSIELLA OXYTOCA" = "Klebsiella",                                               
+"Klebsiella oxytoca (CRE,MDR)" = "Klebsiella",                                     
+"Klebsiella Ozaenae" = "Klebsiella",                                               
+"Klebsiella pneumoniae (ESBL)" = "K. pneumoniae",                                
+"Klebsiella species" = "Klebsiella",                                               
+"Klebsiella Species" = "Klebsiella",                                               
+"klebsiella spp" = "Klebsiella",                                                   
+"Klebsiella Spp." = "Klebsiella",                                                  
+"Klebsiella variicola" = "Klebsiella",
+"Klebsiella(Enterobacter) aerugenes" = "Klebsiella",
+
+"Kluyvera ascorbata" = "Kluyvera",                                                 
+"Kluyvera intermedia" = "Kluyvera",                                                
+"Kochuria kristinae" = "Kocuria",                                                 
+"Kocuria kristinae" = "Kocuria",
+"Kocuria rhizophila" = "Kocuria",
+
+"Lactobacillus " = "Lactobacillus",
+"Lactobacillus plantarum" = "Lactobacillus",
+"Lactobacillus species" = "Lactobacillus",
+"Leclercia adecaboxylata" = "Leclercia",                                           
+"Leclercia adecarboxylata" = "Leclercia",                                          
+"Leclercia adecarboxylate" = "Leclercia",                                          
+"Leptotrichia wadei" = "Leptotrichia",                                                
+"Leuconostoc" = "Leuconostoc",                                                     
+"Leuconostoc lactis" = "Leuconostoc",                                              
+"Leuconostoc species Abnormal " = "Leuconostoc",
+"Leuconostoc species" = "Leuconostoc",
+"Listeria monocytogenes" = "Listeria",
+
+"macrococus species" = "Macrococcus",                                                 
+"Methicilin Resistant Staphylococcus aureus" = "S. aureus",           
+"Methicillin-resistant Staphylococcus aureus" = "S. aureus",          
+"Methicillin-resistant Staphylococcus aureus (MRSA)" = "S. aureus",       
+"Methicillin Resistant Staphyloccous haemolyticus" = "Coagulase-negative staphylococci (CoNS)",                                
+"micrococcus luteus" = "Micrococcus",                                                
+"Moraxella catarrhalis" = "Moraxella",                                            
+"Moraxella cattarhalis" = "Moraxella",                                            
+"Moraxella osloensis" = "Moraxella",                                              
+"moraxella species" = "Moraxella",                                            
+"Moraxella species" = "Moraxella", 
+"Motaxella (Neisseria) ovis" = "Moraxella",
+"Morganella morganii" = "Morganella",
+"MRSA" = "S. aureus",
+"Rapidly growing mycobacterium spp" = "Mycobacterium",
+
+"Nakaseomces blabrata" = "Candida spp.",                                               
+"Nakaseomyces (Candia) glabrata" = "Candida spp.",
+"Nakaseomyces nivariensis" = "Candida spp.",
+
+"NEISSERIA ELONGATA" = "Neisseria",                                               
+"neisseria sicca" = "Neisseria",
+"Neisseria mucosa" = "Neisseria",
+"Nocardia cyriacigeorgica" = "Nocardia",
+
+"Ochrobactrum anthropi" = "Ochrobactrum", 
+"OCHROBACTRUM SPECIES" = "Ochrobactrum",
+"Ochrobactrum intermedium" = "Ochrobactrum",
+
+"Pandoraea species" = "Pandoraea",          
+"pantoea agglomerans" = "Pantoea",                                                 
+"Pantoea agglomerans" = "Pantoea",                                                 
+"Pantoea Agglomerans" = "Pantoea",                                                 
+"Pantoea agglumerans " = "Pantoea",                                                
+"Pantoea dispersa" = "Pantoea",                                                    
+"Pantoea species" = "Pantoea",                                                     
+"PANTOEA SPP" = "Pantoea",                                                         
+"Pantoea spp." = "Pantoea",
+"Paraclostridium bifermentans" = "Paraclostridium",                                
+"Pasteurella multocida" = "Pasteurella", 
+"Pce" = NA, 
+"Pediococcus acidilactici" = "Pediococcus",                                        
+"Peptoniphilus asaccharolyticus" = "Peptoniphilus",                                
+"Pluralibacter gergoviae" = "Pluralibacter",
+"Plesiomonas shigollaoides" = "Plesiomonas",
+"Prevotella denticola" = "Prevotella",                                                             
+"Proteus hauseri" = "Proteus",                                                     
+"Proteus mirabilis" = "Proteus",                                                   
+"Proteus Mirabilis" = "Proteus",                                                   
+"Proteus mirsbilis" = "Proteus",
+"Protius Mirabilis" = "Proteus",
+
+"Providencia rettgeri" = "Providencia",                                            
+"PROVIDENCIA RETTGERI" = "Providencia",                                            
+"Providencia rettigeri" = "Providencia",                                           
+"Providencia Species" = "Providencia",                                             
+"Providencia stuartii" = "Providencia", 
+
+"Pseudomonas aeruginosa" = "Pseudomonas spp.",                                          
+"Pseudomonas oryzihabitans" = "Pseudomonas spp.",                                       
+"PSEUDONOMAS" = "Pseudomonas spp.",                                                     
+"PSEUDONOMAS AERUGINOSA" = "Pseudomonas spp.",                                          
+"Psudomonas aeruginosa" = "Pseudomonas spp.",                                           
+"psudomonas punda" = "Pseudomonas spp.", 
+"Pseudomonas putida" = "Pseudomonas spp.",
+
+"Pluralibcter Gergoviae" = "Enterobacter",
+"Enterobacter hormachei" = "Enterobacter",
+
+"RALSTONIA INSIDIOSA" = "Ralstonia",
+"Ralstonia mannitolilitica" = "Ralstonia",                                         
+"Ralstonia mannitolilytica" = "Ralstonia",
+"Ralstonia mannitolilytics" = "Ralstonia",
+"Ralstonia picketti" = "Ralstonia",                                                
+"Ralstonia pickettii" = "Ralstonia", 
+"Raoultella ornithinolytica" = "Raoultella", 
+"Raoultella terrigena" = "Raoultella",
+"Raoulltella terrigena" = "Raoultella",
+"RAOULTELLA PLANTICOLA" = "Raoultella",
+"Rhizobium radiobacter" = "Rhizobium",                                             
+"Roseomonas gilardii" = "Roseomonas",                                              
+"Roseomonas mucosa" = "Roseomonas", 
+
+"Salmonella serogroup D" = "Salmonella",
+
+"serratia" = "Serratia",                                                           
+"Serratia marcescens" = "Serratia",                                                
+"SERRATIA MARCESCENS" = "Serratia",                                                
+"Serratia marcescens " = "Serratia",                                               
+"serratia marcesceus" = "Serratia",                                                
+"Serratia mercescens" = "Serratia",                                                
+"SERRATIA PLYMUTHICA" = "Serratia",                             
+"Sphingmonas paucimobilis" = "Sphingomonas",                                       
+"sphingomonas paucimobilis" = "Sphingomonas",                                      
+"Sphingomonas paucimobilis" = "Sphingomonas",                                      
+"Sphingomonas paucimobilis." = "Sphingomonas",
+"Sphingomonas pseudosanguinis"  = "Sphingomonas",
+"Sphingomos" = "Sphingomonas",                                                     
+"STAHPHYLOCOCCUS EPIDEMIAL" = "Coagulase-negative staphylococci (CoNS)",
+"Staphyloccocus Blanc" = "Staphylococcus",                                            
+"Staphylococcus argenteus" = "Coagulase-positive staphylococcus (CoPS)",           
+"Staphylococcus argentus" = "Coagulase-positive staphylococcus (CoPS)", 
+"Staphylococcus Blanc" = "Staphylococcus",                                         
+"Staphylococcus Blanc " = "Staphylococcus",
+"Staphylococcus saprophyticus" = "Staphylococcus",
+"STAPHYLOCOCCUS SAPROPHYTICUS" = "Staphylococcus",
+"Stapphylococcus haemolyticus" = "Staphylococcus",
+"Mammaliicoccus (Staphylococcus) sciuri" = "Mammaliicoccus",
+
+"staphylococcus capitis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus capitis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus Capitis" = "Coagulase-negative staphylococci (CoNS)",
+"STAPHYLOCOCCUS CAPITIS" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus capitis " = "Coagulase-negative staphylococci (CoNS)",
+
+"Staphylococcus Capitis & miccocus luteus" = NA, 
+
+"staphylococcus caprae" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus coagulase-negative" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus cohnii" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus epidermidis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus Epidermidis" = "Coagulase-negative staphylococci (CoNS)",
+"STAPHYLOCOCCUS EPIDERMIDIS" = "Coagulase-negative staphylococci (CoNS)",
+"STAPHYLOCOCCUS EPIDERMIS (X2 SITES)" = "Coagulase-negative staphylococci (CoNS)",
+"staphylococcus epidermis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus epidermis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus Epidermis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus Epidermis " = "Coagulase-negative staphylococci (CoNS)",
+"staphylococcus haemolyticus" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus haemolyticus" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus haemolyticus " = "Coagulase-negative staphylococci (CoNS)",
+"Stapphylococcus haemolyticus" = "Coagulase-negative staphylococci (CoNS)",
+
+"STAPHYLOCOCCUS HAEMOLYTICUS, Corynebacterium species" = NA,
+
+"staphylococcus hominis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus hominis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus hominis " = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus hominis (x 2sites)" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus hemolyticus" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus lugdunensis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus Lugdunensis" = "Coagulase-negative staphylococci (CoNS)",
+"Staphylococcus saphrophyticus" = "Coagulase-negative staphylococci (CoNS)",
+
+"Staphylococcus species" = "Staphylococcus",                                      
+"Staphylococcus spp" = "Staphylococcus",                                           
+"Staphylococcus warneri" = "Coagulase-negative staphylococci (CoNS)",              
+"Stenomaltophila" = "Stenotrophomonas spp.",                                            
+"Stenotrophomonas maltophilia" = "Stenotrophomonas spp.",
+"stenoprophomonas maltopilia" = "Stenotrophomonas spp.",
+
+"Flavimonas oryzihabitans" = "Pseudomonas spp.",
+
+"Steptococcus pyogenes" = "Streptococcus",                                         
+"steptococus gallolyticuc" = "Streptococcus",                                      
+"steptococus pyogenes (strep.group A)" = "Streptococcus",                          
+"streptococcus agalactiae" = "Streptococcus",                                      
+"Streptococcus agalactiae" = "Streptococcus",                                      
+"Streptococcus agalactiae (Group B)" = "Streptococcus",
+"Streptococcus agalactica Group B" = "Streptococcus",
+"GROUP B STREPTOCOCCUS" = "Streptococcus",
+"Streptococcus anginosus" = "Streptococcus",                                       
+"streptococcus Anginosus " = "Streptococcus",                                      
+"Streptococcus angnosus " = "Streptococcus",                                       
+"Streptococcus dyagalactiae" = "Streptococcus",                                    
+"Streptococcus Dysagalactiae" = "Streptococcus",                                   
+"streptococcus dysgalactiae" = "Streptococcus",                                    
+"Streptococcus dysgalactiae" = "Streptococcus",                                   
+"streptococcus gallolyticus spp pasteurianus" = "Streptococcus",       
+"Streptococcus gallolyticus spp pasteurianus" = "Streptococcus",                   
+"Streptococcus gordonii" = "Streptococcus",                                        
+"Streptococcus Group D" = "Streptococcus",                                         
+"Streptococcus infantarius" = "Streptococcus",                                     
+"Streptococcus mitis" = "Streptococcus",                                           
+"STREPTOCOCCUS MITIS GROUP" = "Streptococcus",                                     
+"STREPTOCOCCUS MITIS GROUP " = "Streptococcus",                                    
+"streptococcus mitis/ozalis" = "Streptococcus",                                    
+"Streptococcus mitis/streptococcus oralis" = "Streptococcus", 
+"Streptococcus Mileri " = "Streptococcus",
+"Streptococcus oralis" = "Streptococcus",                                          
+"Streptococcus pneumoniae" = "S. pneumoniae",                                      
+"streptococcus pseudoporcinus" = "Streptococcus",                                  
+"Streptococcus pyogenes" = "Streptococcus",
+"Streptococcus pyogens " = "Streptococcus",
+"streptococcus sanglinis" = "Streptococcus",                                       
+"Streptococcus species" = "Streptococcus", 
+"Streptococcus salivarius group" = "Streptococcus", 
+"Streptococcus vestibularis" = "Streptococcus",                                    
+"streptococus angionosus" = "Streptococcus",
+"Streptococcus acidominimus" = "Streptococcus",
+"Streptocoocus gordonii" = "Streptococcus",
+"Streptococcus anginosus group" = "Streptococcus",
+"Streptococcus constellatus " = "Streptococcus",
+"Streptococcus gallolyticus" = "Streptococcus",
+
+"Shewanella algae " = "Shewanella",
+"Shewanella putrefaciens" = "Shewanella",
+
+"TRACHEAL ASPIRATE" = NA,   
+"Trichosporn species" = "Trichosporon",                                            
+"Trichosporon asahii" = "Trichosporon",                                            
+"TRICHOSPORON ASAHII" = "Trichosporon",                                            
+"Veillonella parvula" = "Veillonella",                                             
+"WEISSELLA CONFUSA" = "Weissella",
+"Weisella confusa " = "Weissella",
+".Burkholderia cepacia complex" = "Burkholderia",
+" " = NA,
+
+"Enterococcus gallinarum" = "Enterococcus spp.",
+"Clostridium clostridioforme" = "Clostridium",               
+"Enterobacter aerogenes" = "Enterobacter",                    
+"Oligotrophomonas maltophilia" = "Stenotrophomonas spp.",
+"Enterococcus raffinosus" = "Enterococcus spp.",                  
+"Sma" = "Stenotrophomonas spp.",
+"Alcaligenes xylosoxidans" = "Alcaligenes",                  
+"Elizabethia anopheles" = "Elizabethkingia",
+"Achromobacter xyloxide" = "Achromobacter",                    
+"Hydrostreptococcus gallate" = "Streptococcus",
+"Elizabethobacteria meningosepticum" = "Elizabethkingia",         
+"Staphylococcus capitiy is cap" = "Coagulase-negative staphylococci (CoNS)",
+"Enterobacter cloacae" = "Enterobacter",                      
+"Chrysebacterium indolegenes " = "Chryseobacterium",
+"PANTOEA " = "Pantoea",                                  
+"Staphylococus epidermidis" = "Coagulase-negative staphylococci (CoNS)",
+"Aspeergillus fumigatus " = "Aspergillus",                   
+"Serratia marcesenes " = "Serratia",
+"Burkholderia cepecia " = "Burkholderia",                     
+"Sphingomonas morbilis " = "Sphingomonas",
+"Staphylococus capitis " = "Coagulase-negative staphylococci (CoNS)",                  
+"S.epidermidis" = "Coagulase-negative staphylococci (CoNS)", 
+"Aeromonas verroni" = "Aeromonas",                         
+"Burkholderia cepaciae" = "Burkholderia",
+"acinetobacter baumanii" = "Acinetobacter spp.",                    
+"acinetobacter spp" = "Acinetobacter spp.", 
+"acinetobacter baumini" = "Acinetobacter spp.",                       
+"Corynebacterium arthrosphaerae" = "Corynebacterium",
+"Staphylococcus sp." = "Staphylococcus",                        
+"Triochosporan asahii" = "Trichosporon",
+"Burkholderia SPP." = "Burkholderia",                         
+"Bacilius SP." = "Bacillus",
+"Staphylococcud lugdunensis" = "Coagulase-negative staphylococci (CoNS)",                 
+"Burkholderia gladioli" = "Burkholderia",
+"Nakaseomyces glabratus" = "Candida spp.",                   
+"ARCANOBACTERIUM HAEMOLYTICUM" = "Arcanobacterium",
+"Burkholderia vietnamiensis" = "Burkholderia",                
+"Streptococcus sanguinis" = "Streptococcus",
+"Streptococcus mitis/oralis" = "Streptococcus",                
+"Salmonella enterica" = "Salmonella",
+"Elizabethkinglia anophelis" = "Elizabethkingia",                
+"Pantoea sp" = "Pantoea",
+"Achromobacter xylosoxidans ss denitrificans" = "Achromobacter",
+" Elizabethkingia meningosepticum" = "Elizabethkingia",
+"Diptheroids" = "Corynebacterium",                               
+"Elizabethkingia meningosepticum" = "Elizabethkingia",
+"Aerococccus spp" = "Aerococcus",                           
+"Burholderia gladioli" = "Burkholderia",
+"Trichosporon spp." = "Trichosporon",                         
+"Nakaseomyces glabrata" = "Candida spp.", 
+"Halomonas aquamarinus" = "Halomonas",                     
+"Plesiomonas shigelloides" = "Plesiomonas",
+"Chryseobacterium taklimakanense" = "Chryseobacterium",            
+"Stenotrophomomas maltophilia" = "Stenotrophomonas spp.",
+"Brevibacterium casei" = "Brevibacterium",                      
+"Ralstomia mannitolilytica" = "Ralstonia",
+"Bactericides uniformis" = "Bacteroides",
+
+"candida paratropicalis" = "Candida spp.",
+"streptococcus sanguis" = "Streptococcus",
+"streptococus,agalactiae" = "Streptococcus",            
+"Enterococcus faecalis" = "Enterococcus spp.",
+"Citrobacter koserii" = "Citrobacter",                
+"ROSEMONAS GIRRDII" = "Roseomonas",
+"Corynebacterium bovis" = "Corynebacterium",              
+"Geotrichum SP." = "Geotrichum",
+"Bacillus sp." = "Bacillus",                       
+"Burkhoderia cepacia " = "Burkholderia",
+"S. epidermidis" = "Coagulase-negative staphylococci (CoNS)",                     
+"Delftia acidovorans" = "Delftia",
+"Comamonas testosteronii" = "Comamonas",             
+"Klebsiella (Enterobacter) aerogenes " = "Klebsiella",
+"Yeast cell" = "Candida spp.",                         
+"Pleiseomonas shigelloides" = "Plesiomonas",
+"Klebsiella oxytocin" = "Klebsiella",
+
+"Streptococcus constellation" = "Streptococcus",
+"Fusobacterium nucleatum" = "Fusobacterium",   
+"Klebsiella acidogenes" = "Klebsiella",      
+"Lactobacillus fermentans" = "Lactobacillus",   
+"Human Staphylococcus" = "Staphylococcus",                 
+"staphylococcus aureus" = "S. aureus",     
+"N0" = NA,   
+"Cryseobacterium indologenes" = "Chryseobacterium",
+"Kalamiella piersonii" = "Kalamiella",       
+"Burkholderia seminalis" = "Burkholderia",   
+"Ochrobacrum anthropi" = "Ochrobactrum",      
+"Streptococcus viridans" = "Streptococcus",     
+"Burkholderia gladiola" = "Burkholderia",
+"Myroides sp." = "Myroides",
+"Yeast" = "Unspecified fungus"
+)
+
+# 
+cleaned_mapping <- setNames(lapply(names(name_mapping), function(key) {
+  trimws(key, which = "both")
+}), name_mapping)
+
+standardize_org_name <- function(name, mapping) {
+  # Normalize the name by removing all extra spaces and converting to lower case
+  normalized_name <- tolower(gsub("[[:punct:]]", "", gsub("[[:space:]]+", " ", str_trim(name))))
+  
+  # Match the normalized name against patterns in the mapping, allowing for extra characters
+  matches <- sapply(names(mapping), function(pattern) {
+    # Normalize pattern for matching
+    normalized_pattern <- tolower(gsub("[[:punct:]]", "", gsub("[[:space:]]+", " ", trimws(pattern))))
+    grepl(paste0("^", normalized_pattern, "$"), normalized_name)
+  })
+  
+  # If a match is found, return the mapped value; otherwise, return the original name
+  if (any(matches)) {
+    return(mapping[names(mapping)[which(matches)[1]]])
+  } else {
+    return(name)
+  }
+}
+
+ast_add <- ast_add %>%
+  mutate(org_names_all = sapply(org_names_all, standardize_org_name, mapping = name_mapping))
+
+# Updated lists of organism names for each class
+# Gram-negative bacteria (gnb_list)
+gnb_list <- c("Pseudomonas spp.", "Shewanella", "Acinetobacter spp.", "E. coli", "Sphingomonas", 
+              "Haemophilus", "K. pneumoniae", "Burkholderia", "Klebsiella", "Pantoea", 
+              "Chromobacterium", "Ochrobactrum", "Elizabethkingia", "Enterobacter", 
+              "Aeromonas", "Pandoraea", "Citrobacter", "Stenotrophomonas spp.", "Morganella", 
+              "Serratia", "Proteus", "Kluyvera", "Achromobacter", "Providencia", 
+              "Chryseobacterium", "Raoultella", "Ralstonia", "Moraxella", "Neisseria", 
+              "Prevotella", "Cupriavidus", "Flavobacterium", "Leclercia", 
+              "Pluralibacter", "Roseomonas", "Agrobacterium", "Rhizobium", 
+              "Halomonas", "Comamonas", "Edwardsiella", "Plesiomonas", "Cronobacter", 
+              "Pasteurella", "Salmonella", "Escherichia", "Veillonella",
+              "Alcaligenes", "Delftia", "Bacteroides", "Fusobacterium", "Leptotrichia",
+              "Kalamiella", "Myroides")
+
+# Gram-positive bacteria (gpb_list)
+gpb_list <- c("Coagulase-negative staphylococci (CoNS)", "S. aureus", 
+              "S. pneumoniae", "Enterococcus spp.", "Streptococcus", 
+              "Corynebacterium", "Pediococcus", "Lactobacillus", "Actinomyces", 
+              "Anaerococcus", "Peptoniphilus", "Kocuria", "Cutibacterium", 
+              "Coagulase-positive staphylococcus (CoPS)", "Bacillus", "Micrococcus", 
+              "Macrococcus", "Nocardia", "Aerococcus", "Granulicatella", "Leuconostoc", 
+              "Clostridium", "Paraclostridium", "Eggerthella",  "Abiotrophia", 
+              "Weissella", "Gemella", "Arthrobacter", "Listeria", 
+              "Mycobacterium", "Mammaliicoccus", 
+              "Staphylococcus", "Arcanobacterium", "Brevibacterium")
+
+# Fungi (fungi_list)
+fungi_list <- c("Candida spp.", "Cryptococcus", "Aspergillus", "Trichosporon", "Bipolaris", "Geotrichum", "Unspecified fungus")
+
+# Check for unclassified microorganisms
+remaining_orgs <- setdiff(unique(ast_add$org_names_all), c(gnb_list, gpb_list, fungi_list))
+
+# Output unclassified microorganisms
+remaining_orgs
+
+# Adding a new column 'Class' based on 'org_names_all'
+ast_add <- ast_add %>%
+  mutate(Class = case_when(
+    org_names_all %in% gnb_list ~ "GNB",
+    org_names_all %in% gpb_list ~ "GPB",
+    org_names_all %in% fungi_list ~ "Fungi",
+    TRUE ~ "Unknown"   
+  ))
+
+# Combine
+ast_results <- cbind(ast_results, ast_add)
+ast_results <- as.data.frame(ast_results)
+
+anti_used <- anti %>%
+  arrange(anti_group)
+
+# AST related variables
+ast_used <- ast_results[,c(which(colnames(ast_results) %in% c(anti_used$sus_names, names(ast_add))))]
+
+# Trans to factor
+anti_used$anti_group <- factor(trimws(as.character(anti_used$anti_group)))
+
+###
+# Order anti_used$sus_names ("susceptibility_")
+match_order <- match(anti_used$sus_names, colnames(ast_used))
+ast_add_index <- which(colnames(ast_used) %in% names(ast_add))
+match_order <- c(match_order, ast_add_index) 
+
+# New order
+ast_used <- ast_used[, match_order]
+colnames(ast_used) <- c(anti_used$anti_names, names(ast_add))
+
+# Update org based on others 
+ast_used <- ast_used %>%
+  mutate(
+    org = case_when(
+      org == 14 & org_names_all == "E. coli" ~ 1,
+      org == 14 & org_names_all == "K. pneumoniae" ~ 2,
+      org == 14 & org_names_all == "Acinetobacter spp." ~ 3,
+      org == 14 & org_names_all == "Pseudomonas spp." ~ 4,
+      org == 14 & org_names_all == "Serratia" ~ 5,
+      org == 14 & org_names_all == "Proteus" ~ 6,
+      org == 14 & org_names_all == "Morganella" ~ 7,
+      org == 14 & org_names_all == "Enterobacter" ~ 8,
+      org == 14 & org_names_all == "Stenotrophomonas spp." ~ 9,
+      org == 14 & org_names_all == "S. aureus" ~ 10,
+      org == 14 & org_names_all == "Enterococcus spp." ~ 11,
+      org == 14 & org_names_all == "S. pneumoniae" ~ 12,
+      org == 14 & org_names_all == "Candida spp." ~ 13,
+      org == 14 & is.na(org_names_all) ~ NA_real_,
+      TRUE ~ org 
+    )
+  )
+
+# -----------------------------------------------------------------------
+# Carbapenem resistance 
+# Certapenem-resistant Acinetobacter / Pseudomonas should NOT be considered CRAB / CR-PA 
+# because both Acinetobacter and Pseudomonas are intrinsically resistant to ertapenems
+# Trans all AST results to NA
+pa_ab_index <- which(ast_used$org_names_all %in% c("Acinetobacter spp.", "Pseudomonas spp."))
+ast_used$Ertapenem[pa_ab_index] <- 5
+
+# -----------------------------------------------------------------------
+# For Acinetobacter (anti: Ampicillin/sulbactam)
+# intrinsically resistant to Amoxicillin-clavulanate and Cefotaxime/clavulanic acid
+ab_spp_index <- which(ast_used$org_names_all == "Acinetobacter spp.")
+ast_used$`Amoxicillin-clavulanate`[ab_spp_index] <- 5
+ast_used$`Cefotaxime/clavulanic acid`[ab_spp_index] <- 5
+
+# -----------------------------------------------------------------------
+# Polymyxins are ineffective against Providencia spp., Neisseria spp., 
+# Proteus spp., Serratia marcescens, and Burkholderia cepacia
+polymyxins_R_org_index <- which(ast_used$org_names_all %in% c("Burkholderia", "Morganella", "Serratia", "Proteus", "Providencia", "Neisseria", "Veillonella", "Clostridium", "Bacteroides", "Fusobacterium", "Mycobacterium", "Kalamiella", "Myroides", "Staphylococcus", "Enterococcus spp.", "Prevotella", "Actinomyces", "Paraclostridium", "Cutibacterium"))
+
+# Specific antibiotics for Polymyxins
+polymyxins_spec_anti_cols <- which(colnames(ast_used) %in% anti$anti_names[anti$anti_group == "Polymyxins"])
+
+# Trans all AST results to NA
+ast_used[polymyxins_R_org_index, polymyxins_spec_anti_cols] <- 5
+# -----------------------------------------------------------------------
+## Prepare different graphics
+# Split anti group
+df_anti_used <- split(anti_used, anti_used$anti_group)
+
+process_ast_group <- function(df_anti_used_group, ast_used) {
+  df_ast_ori <- df_ast <- ris <- ast_merged <- list()
+  
+  system.time({
+    for (i in seq_along(df_anti_used_group)) {
+      df <- df_anti_used_group[[i]]
+      df_ast_ori[[i]] <- ast_used %>% select(df$anti_names)
+      ris[[i]] <- apply(df_ast_ori[[i]], 1, min)
+    }
+  })
+  
+  for (i in seq_along(df_ast_ori)) {
+    # Initialize df_ast[[i]] with the structure of df_ast_ori[[i]]
+    df_ast[[i]] <- df_ast_ori[[i]]
+    
+    for (j in 1:nrow(df_ast_ori[[i]])) {
+      df_ast[[i]][j, ] <- ifelse(df_ast[[i]][j, ] == ris[[i]][j], 1, 0)
+    }
+    
+    ast_merged[[i]] <- cbind(df_ast_ori[[i]], ris[[i]])
+    colnames(ast_merged[[i]]) <- c(colnames(df_ast_ori[[i]]), paste0("ris_", names(df_anti_used_group)[i]))
+  }
+  
+  return(list(df_ast_ori = df_ast_ori, df_ast = df_ast, 
+              ris = ris, ast_merged = ast_merged))
+}
+
+results_ast <- process_ast_group(df_anti_used, ast_used)
+
+# Extract results 
+df_ast <- results_ast$df_ast_ori
+ris_all <- results_ast$ris
+ast_merged <- results_ast$ast_merged
+
+# ---------------
+# Merge organisms
+# levels 1 to 5, 9 to 11, 13 respectively represent 
+# "E. coli", "K. pneumoniae","Acinetobacter spp.", "Pseudomonas spp.",
+# "Serratia/Proteus/Morganella/Enterobacter"
+# "Stenotrophomonas spp.", "S. aureus", "Enterococcus spp.", "Candida spp."
+# 14 others
+###
+# Each ast and other info
+process_each_ast <- function(ast_merged, ast_used, ast_add_index) {
+  each_ast <- list()
+  
+  for (i in seq_along(ast_merged)) {
+    each_ast[[i]] <- cbind(ast_merged[[i]], ast_used[, ast_add_index])
+    
+    each_ast[[i]] <- each_ast[[i]] %>%
+      mutate(
+        org_new = case_when(
+          org %in% c(1, 2, 3, 4, 9, 10, 11, 13, 14) ~ org,
+          org %in% c(5, 6, 7, 8) ~ 5,
+          org %in% 12 ~ 14,
+          TRUE ~ NA_real_
+        )
+      )
+    
+    each_ast[[i]]$pathogen_group <- case_when(
+      each_ast[[i]]$org_new %in% c("1", "2", "3", "4", "5", "9") ~ "GNB",
+      each_ast[[i]]$org_new %in% c("10", "11") ~ "GPB",
+      each_ast[[i]]$org_new %in% c("13") ~ "Fungi",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  return(each_ast)
+}
+
+#
+each_ast <- process_each_ast(ast_merged, ast_used, ast_add_index)
+
+# Combine all ast data into one single data frame
+all_ast_merged <- do.call(cbind, ast_merged)
+
+# Add other info
+all_ast_merged <- cbind(all_ast_merged, ast_used[, ast_add_index])
+
+# Add AST results for methicillin
+methicillin_cols <- c("Oxacillin", "Cefoxitin", "Cefazolin", "Cloxacillin")
+all_ast_merged$Methicillin <- apply(all_ast_merged[, methicillin_cols], 1, min, na.rm = TRUE)
+
+# Combine organisms into new group
+all_ast_merged <- all_ast_merged %>% 
+  mutate(
+    org_new = case_when(
+      org %in% c(1, 2, 3, 4, 9, 10, 11, 13, 14) ~ org,
+      org %in% c(5, 6, 7, 8) ~ 5,
+      org %in% 12 ~ 14,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Add pathogen group for new group of listed organisms
+all_ast_merged$pathogen_group <- case_when(
+    all_ast_merged$org_new %in% c("1", "2", "3", "4", "5", "9") ~ "GNB",
+    all_ast_merged$org_new %in% c("10", "11") ~ "GPB",
+    all_ast_merged$org_new %in% c("13") ~ "Fungi",
+    TRUE ~ NA_character_
+  )
+
+# Trans organism names
+all_ast_merged$org_new <- factor(all_ast_merged$org_new,
+                                 levels = c(1:5, 9:11, 13, 14),
+                                 labels = c("E. coli", "K. pneumoniae", 
+                                            "Acinetobacter spp.", "Pseudomonas spp.", 
+                                            "Serratia/Proteus/Morganella/Enterobacter",
+                                            "Stenotrophomonas spp.", "S. aureus",
+                                            "Enterococcus spp.", "Candida spp.", "Others"))
+# ------------------------------------------------------------------------------------
+# Revise AST results for CRE & 3GCRE
+# Specific antibiotics for carbapenem or third-generation cephalosporins
+car_anti_cols <- which(colnames(all_ast_merged) %in% c(anti$anti_names[anti$anti_group == "Carbapenem" | anti$anti_group_pa_ab == "Carbapenem"], "ris_Carbapenem"))
+
+
+tgc_anti_cols <- which(colnames(all_ast_merged) %in% c(anti$anti_names[anti$anti_group == "Third-generation cephalosporin" | anti$anti_group_pa_ab == "Third-generation cephalosporin"], "ris_Third-generation cephalosporin"))
+
+# Enterobacterales
+ent_spec_org <- c(
+  "E. coli", "K. pneumoniae", "Klebsiella", 
+  "Enterobacter", "Serratia", "Proteus", "Morganella",
+  "Citrobacter", "Providencia", "Raoultella", "Kluyvera",
+  "Cronobacter", "Leclercia", "Pluralibacter", 
+  "Edwardsiella", "Pantoea", "Escherichia", "Salmonella",
+  "Kalamiella"
+)
+
+rows_ent_ast_all <- which(all_ast_merged$org_names_all %in% ent_spec_org)
+
+# CRE
+rows_car_r_all <- which(all_ast_merged$ris_Carbapenem == 1)
+rows_cre_ent_r_all <- intersect(rows_ent_ast_all, rows_car_r_all)
+
+all_ast_merged[rows_cre_ent_r_all, tgc_anti_cols] <- 5 # 3GC to NA
+
+# 3GCRE
+rows_car_other_all <- which(all_ast_merged$ris_Carbapenem != 1)
+rows_3gcre_r_all_ori <- which(all_ast_merged$`ris_Third-generation cephalosporin` == 1)
+
+rows_3gcre_r_all <- intersect(rows_car_other_all, rows_3gcre_r_all_ori)
+all_ast_merged[rows_3gcre_r_all, car_anti_cols] <- 5 # CR to NA
+
+# ------------------------------------------------------------------------------------
+# Index episode and related organisms
+all_ast_merged_index_vap <- all_ast_merged[which(all_ast_merged$f07m_vapc == 1),]
+all_ast_merged_index_bsi <- all_ast_merged[which(all_ast_merged$f07m_bsic == 1),]
+
+# Delete some error organisms recorded more than one time in the same episode
+all_ast_merged_index_vap <- all_ast_merged_index_vap %>%
+  group_by(recordid, org_names_all) %>%
+  distinct(recordid, org_names_all, .keep_all = TRUE) %>%
+  ungroup()
+
+all_ast_merged_index_bsi <- all_ast_merged_index_bsi %>%
+  group_by(recordid, org_names_all) %>%
+  distinct(recordid, org_names_all, .keep_all = TRUE) %>%
+  ungroup()
+
+# Combine data
+all_ast_merged_index <- rbind.data.frame(all_ast_merged_index_vap, all_ast_merged_index_bsi)
+###
+```
+# Infection types for duplicate recordid
+```{r}
+# For those with same infection onset of VAP and BSI
+duplicate_all_ast_merged_index <- all_ast_merged_index[which(all_ast_merged_index$recordid %in% duplicate_recordids), ]
+
+# If there are occurring the different organisms in both VAP and BSI episode, included respectively into VAP and BSI
+different_org_records <- duplicate_all_ast_merged_index %>%
+  group_by(recordid) %>%
+  filter(any(f07m_vapc == 1) & any(f07m_bsic == 1)) %>%
+  filter(n_distinct(org_names_all) > 1) %>%
+  ungroup()
+
+same_org_records <- duplicate_all_ast_merged_index %>%
+  group_by(recordid) %>%
+  filter(any(f07m_vapc == 1) & any(f07m_bsic == 1)) %>%
+  filter(n_distinct(org_names_all) == 1) %>%
+  ungroup()
+
+# Based on the earlier infection onset date
+all_ast_merged_index_remain <- all_ast_merged_index[-which(all_ast_merged_index$recordid %in% duplicate_rows$recordid),]
+
+# Combine all dataframes related to all_ast_merged_index
+all_ast_merged_index <- rbind.data.frame(all_ast_merged_index_remain, same_org_records, different_org_records)
+```
+# Infection types with and without the duplicate 
+```{r}
+# -------------------------------------
+# To choose the earlier infection onset
+recordid_not_duplicate <- combined_df_ori %>%
+  filter(!recordid %in% duplicate_rows$recordid) %>% 
+  arrange(recordid, inf_onset) %>% 
+  group_by(recordid) %>% 
+  slice(1) 
+
+# -------------------------------------
+# For those including duplicate_rows with same organisms
+same_org_duplicate_rows <- combined_df_ori %>%
+  filter(recordid %in% same_org_records$recordid) %>% 
+  filter(infection_types == "VAP")
+
+# -------------------------------------
+# For those including duplicate_rows with different organisms
+diff_org_duplicate_rows <- combined_df_ori %>%
+  filter(recordid %in% different_org_records$recordid)  
+  
+# --------------------------------------
+# Combine
+inf_add <- rbind.data.frame(recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows)
+
+# Trans format
+inf_add$inf_onset <- as.Date(inf_add$inf_onset, format="%Y-%m-%d")
+```
+# Modify recordid for those with VAP and BSI in ind_add
+```{r}
+# recordid of those with VAP and BSI
+inf_add_duplicated_rows <- which(duplicated(inf_add$recordid) | duplicated(inf_add$recordid, fromLast = TRUE))
+
+inf_add_revise_id <- unique(inf_add$recordid[inf_add_duplicated_rows])
+
+# recordid_with_suffix are added based on the presence of substrings in infection_types
+inf_add$recordid[inf_add_duplicated_rows] <- with(inf_add[inf_add_duplicated_rows,], {
+  ifelse(grepl("VAP", infection_types), 
+         paste0(recordid, "_VAP"), 
+         ifelse(grepl("BSI", infection_types), 
+                paste0(recordid, "_BSI"), 
+                recordid))
+})
+```
+# Modify recordid of each_ast[[i]] and all_ast_merged_index
+# Add infection types
+```{r}
+# Define the function
+process_ast_data <- function(ast_data, inf_add, recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows) {
+  # Filter 'ast_data' based on 'recordid_not_duplicate'
+  filtered_records_not_duplicate <- ast_data %>%
+    filter(recordid %in% recordid_not_duplicate$recordid)
+  
+  # Get record IDs from inf_add based on infection types
+  inf_add_has_vap_id <- inf_add %>%
+    filter(str_detect(infection_types, "VAP")) %>%
+    pull(recordid)
+  
+  inf_add_has_bsi_id <- inf_add %>%
+    filter(str_detect(infection_types, "BSI")) %>%
+    pull(recordid)
+  
+  # Filter for VAP and BSI cases
+  filtered_records_not_duplicate_vap <- filtered_records_not_duplicate %>%
+    filter(recordid %in% inf_add_has_vap_id, f07m_vapc == 1)
+  
+  filtered_records_not_duplicate_bsi <- filtered_records_not_duplicate %>%
+    filter(recordid %in% inf_add_has_bsi_id, f07m_bsic == 1)
+  
+  # Combine the filtered records
+  filtered_records_not_duplicate <- bind_rows(filtered_records_not_duplicate_vap, filtered_records_not_duplicate_bsi)
+  
+  # Filter rows in 'ast_data' where 'recordid' is in 'same_org_duplicate_rows'
+  # Only keep rows where f07m_vapc == 1
+  filtered_same_org <- ast_data %>%
+    filter(recordid %in% same_org_duplicate_rows$recordid, f07m_vapc == 1)
+  
+  # Filter rows in 'ast_data' where 'recordid' is in 'diff_org_duplicate_rows'
+  filtered_diff_org <- ast_data %>%
+    filter(recordid %in% diff_org_duplicate_rows$recordid)
+  
+  # Function to modify recordid based on conditions
+  modify_recordid <- function(df) {
+    df$recordid <- as.character(df$recordid)
+    
+    # Initialize empty lists to store modified data frames
+    df_vap <- data.frame()
+    df_bsi <- data.frame()
+    
+    # Get unique recordids
+    unique_records <- unique(df$recordid)
+    
+    # Loop through each unique recordid
+    for (rec_id in unique_records) {
+      # Subset the data frame for the current recordid
+      subset_df <- df[df$recordid == rec_id, ]
+      
+      # Check and handle f07m_vapc condition
+      if (any(subset_df$f07m_vapc == 1)) {
+        df_vap_temp <- subset_df
+        df_vap_temp$recordid <- paste0(rec_id, "_VAP")
+        df_vap <- rbind(df_vap, df_vap_temp)
+      }
+      
+      # Check and handle f07m_bsic condition
+      if (any(subset_df$f07m_bsic == 1)) {
+        df_bsi_temp <- subset_df
+        df_bsi_temp$recordid <- paste0(rec_id, "_BSI")
+        df_bsi <- rbind(df_bsi, df_bsi_temp)
+      }
+    }
+    
+    # Combine the results from both conditions
+    df_modified <- rbind(df_vap, df_bsi)
+    
+    return(df_modified)
+  }
+  
+  # Apply the function to your dataframe
+  modified_diff_org <- modify_recordid(filtered_diff_org)
+  
+  modified_diff_org_vap <- modified_diff_org %>%
+    filter(str_detect(recordid, "_VAP$") & f07m_vapc == 1)
+  
+  modified_diff_org_bsi <- modified_diff_org %>%
+    filter(str_detect(recordid, "_BSI$") & f07m_bsic == 1)
+  
+  modified_diff_org <- bind_rows(modified_diff_org_vap, modified_diff_org_bsi)
+  
+  # Combine data
+  all_ast_combined <- bind_rows(filtered_records_not_duplicate,
+                                filtered_same_org, modified_diff_org)
+  
+  # Add infection types
+  all_ast_combined <- left_join(all_ast_combined, inf_add, by = "recordid")
+  
+  return(all_ast_combined)
+}
+
+# Usage for all_ast_merged_index
+all_ast_merged_index <- process_ast_data(all_ast_merged_index, inf_add, recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows)
+
+# --------------------
+# Define custom function to calculate min with a check for missing values, ensuring the return type is Date
+custom_min <- function(x) {
+  x <- as.Date(x)
+  if (length(x) == 0L || all(is.na(x))) {
+    NA_Date_    # as NA          
+  } else {
+    suppressWarnings(min(x, na.rm = TRUE))
+  }
+}
+
+# Apply custom_min function to Index Specimen Date
+spec_date_index <- all_ast_merged_index %>%
+  group_by(recordid) %>%
+  dplyr::summarize(spec_date = custom_min(spec_date), ast_date = custom_min(ast_date), .groups = "keep") %>%
+  ungroup()
+
+# Replace NA in inf_onset with spec_date for matching recordid
+inf_add <- inf_add %>%
+  left_join(spec_date_index[, c("recordid", "spec_date")], by = "recordid") %>%
+  mutate(inf_onset = as.Date(ifelse(is.na(inf_onset), spec_date, inf_onset), origin = "1970-01-01")) %>%
+  select(-spec_date)
+
+# --------------------
+# Usage for each element in each_ast
+process_each_ast_list <- function(each_ast_list, inf_add, recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows) {
+  lapply(each_ast_list, function(ast) {
+    process_ast_data(ast, inf_add, recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows)
+  })
+}
+# Apply the processing to each ast group
+each_ast <- process_each_ast_list(each_ast, inf_add, recordid_not_duplicate, same_org_duplicate_rows, diff_org_duplicate_rows)
+```
+# Modify recordid for those with VAP and BSI in all dataframe 
+```{r}
+# --------------------
+# One row per patients
+# data[[1]], data[[3]], data[[4]], data[[7]], data[[8]]
+cols_to_modify <- c(1, 3, 4, 7, 8)
+
+for (col in cols_to_modify) {
+
+  rows_to_modify <- data[[col]] %>%
+    filter(recordid %in% inf_add_revise_id)
+  
+  rows_unmodified <- data[[col]] %>%
+    filter(!(recordid %in% inf_add_revise_id))
+  
+  rows_VAP <- rows_to_modify %>%
+    mutate(recordid = paste0(recordid, "_VAP"))
+  
+  rows_BSI <- rows_to_modify %>%
+    mutate(recordid = paste0(recordid, "_BSI"))
+  
+  data[[col]] <- bind_rows(rows_unmodified, rows_VAP, rows_BSI)
+}
+
+# -------------------
+# data[[2]]
+# Filter the data for redcap_repeat_instance == 1
+data_2_index <- data[[2]][data[[2]]$redcap_repeat_instance == 1,]
+
+# Split the data into VAP and BSI episodes
+data_2_index_vap <- data_2_index[data_2_index$redcap_event_name == "vap_episode_arm_1",]
+data_2_index_bsi <- data_2_index[data_2_index$redcap_event_name == "bsi_episode_arm_1",]
+
+# Update record IDs for VAP episodes
+data_2_index_vap$recordid[data_2_index_vap$recordid %in% inf_add_revise_id] <- 
+  paste0(data_2_index_vap$recordid[data_2_index_vap$recordid %in% inf_add_revise_id], "_VAP")
+
+# Update record IDs for BSI episodes
+data_2_index_bsi$recordid[data_2_index_bsi$recordid %in% inf_add_revise_id] <- 
+  paste0(data_2_index_bsi$recordid[data_2_index_bsi$recordid %in% inf_add_revise_id], "_BSI")
+
+# Combine the updated VAP and BSI data
+data_2_index <- rbind(data_2_index_vap, data_2_index_bsi)
+
+# Replace the filtered data in the original dataset
+data[[2]][data[[2]]$redcap_repeat_instance == 1,] <- data_2_index
+
+# -------------
+# data[[5]] -> BSI
+data_5_index_bsi <- data[[5]][which(data[[5]]$redcap_repeat_instance == 1),]
+data_5_index_bsi$recordid[which(data_5_index_bsi$recordid %in% inf_add_revise_id)] <-
+  paste0(data_5_index_bsi$recordid[which(data_5_index_bsi$recordid %in% inf_add_revise_id)], "_BSI")
+
+data[[5]][which(data[[5]]$redcap_repeat_instance == 1),] <- data_5_index_bsi
+
+# -------------
+# data[[6]] -> VAP
+data_6_index_vap <- data[[6]][which(data[[6]]$redcap_repeat_instance == 1),]
+data_6_index_vap$recordid[which(data_6_index_vap$recordid %in% inf_add_revise_id)] <- 
+  paste0(data_6_index_vap$recordid[which(data_6_index_vap$recordid %in% inf_add_revise_id)], "_VAP")
+
+data[[6]][which(data[[6]]$redcap_repeat_instance == 1),] <- data_6_index_vap
+
+# -------------
+# Antibiotics
+# Anti start and end date
+anti_start <- data[[9]] %>% 
+  select(starts_with("antib_start_date"))
+
+anti_end <- data[[9]] %>% 
+  select(starts_with("antib_end_date"))
+
+anti_start_all <- do.call(pmax, c(anti_start, na.rm = TRUE))
+anti_end_all <- do.call(pmax, c(anti_end, na.rm = TRUE))
+
+# Antibiotics for specific episode
+bsi_epi <- data[[9]] %>% 
+  select(starts_with("bsi_antib"))
+
+vap_epi <- data[[9]] %>% 
+  select(starts_with("vap_antib"))
+
+# Merge multiple columns into one column
+bsi_epi_all <- do.call(pmax, c(bsi_epi, na.rm = TRUE))
+vap_epi_all <- do.call(pmax, c(vap_epi, na.rm = TRUE))
+
+# Combine
+anti_treat <- data.frame(data[[9]]$recordid, 
+                         anti_start_all, anti_end_all,
+                         vap_epi_all, bsi_epi_all)
+
+# Antibiotics names and group
+# NA in anti names 
+data[[9]]$antib[which(is.na(data[[9]]$antib))] <- 1000
+#
+anti_treat_add <- matrix(NA, nrow = nrow(data[[9]]), ncol = 2)
+system.time({
+  for (i in 1:nrow(data[[9]])) {
+    for (j in 1:nrow(anti)) {
+      if (data[[9]]$antib[i] == anti$antibiotics_f07e[j]) {
+        anti_treat_add[i,1] <- anti$anti_names[j]
+        anti_treat_add[i,2] <- anti$anti_group[j]
+      } else {
+        
+      }
+    }
+  }
+})
+
+# Renames
+anti_treat <- data.frame(anti_treat, anti_treat_add)
+colnames(anti_treat) <- c("recordid", 
+                          "anti_start", "anti_end",
+                          "vap_epi", "bsi_epi",
+                          "anti_names", 
+                          "anti_group")
+
+# Replace empty strings ("") with NA
+anti_treat[anti_treat == ""] <- NA
+
+# Identify and keep one row per set of duplicates within the same recordid
+# And delete the all NA rows
+deduplicated_rows_anti_treat <- anti_treat %>%
+  group_by(recordid) %>%
+  distinct() %>%
+  ungroup() %>%
+  filter(!(
+    apply(select(., -recordid), 1, function(row) {
+      all(str_trim(row) == "" | is.na(row))
+    })
+  ))
+
+# Identify rows where `recordid` appears only once
+single_occurrence_anti_treat <- anti_treat %>%
+  group_by(recordid) %>%
+  filter(n() == 1) %>%
+  ungroup()
+
+# Combine deduplicated rows, single occurrences, and filtered non-duplicate rows
+anti_treat_clean <- bind_rows(deduplicated_rows_anti_treat, single_occurrence_anti_treat)
+
+# Create VAP and BSI rows directly, with recordid suffix
+anti_treat_revise_rows <- do.call(rbind, lapply(
+  c("_VAP", "_BSI"),
+  function(suffix) {
+    rows <- anti_treat_clean[anti_treat_clean$recordid %in% inf_add_revise_id, ]
+    rows$recordid <- paste0(rows$recordid, suffix)
+    return(rows)
+  }
+))
+
+# Remove original records and add revised rows
+anti_treat_clean <- anti_treat_clean[!(anti_treat_clean$recordid %in% inf_add_revise_id), ]
+anti_treat_index <- rbind.data.frame(anti_treat_clean, anti_treat_revise_rows)
+```
+## All recordid of those with VAP and BSI has been revised
+# Baseline and outcomes
+```{r}
+# Date of enrollment and birth
+birth_date <- c("dmdtc", "brthdtc")
+birth_date_indices <- which(names(data[[1]]) %in% birth_date)
+# as.Date
+for (i in birth_date_indices) {data[[1]][,i] = as.Date(data[[1]][,i])}
+
+# ------------------------------------------------------------
+# Identify duplicate recordids
+duplicate_recordid1 <- data[[1]]$recordid[duplicated(data[[1]]$recordid) | duplicated(data[[1]]$recordid, fromLast = TRUE)]
+
+# Separate duplicate rows
+duplicate_rows1 <- data[[1]][data[[1]]$recordid %in% duplicate_recordid1, ]
+
+# Infection onset information for duplicate rows
+duplicate_rows1_inf <- inf_add[inf_add$recordid %in% duplicate_rows1$recordid, ]
+
+# Merge duplicate_rows1 and duplicate_rows1_inf based on recordid
+data1_merged_data <- merge(duplicate_rows1, duplicate_rows1_inf, by = "recordid", suffixes = c("_data1", "_inf"))
+
+# Calculate the absolute date difference
+data1_merged_data$date_diff <- abs(as.Date(data1_merged_data$inf_onset) - as.Date(data1_merged_data$hpd_adm_date))
+
+# Sort by recordid and date_diff
+data1_merged_data <- data1_merged_data[order(data1_merged_data$recordid, data1_merged_data$date_diff), ]
+
+# Filter the closest rows for duplicate recordid
+data1_filtered_duplicate_rows <- data1_merged_data %>%
+  group_by(recordid) %>%
+  slice_min(order_by = date_diff, n = 1) %>%
+  ungroup()
+
+# Keep only the rows in data[[1]] that match the filtered duplicate rows
+data1_filtered_rows <- data[[1]][data[[1]]$recordid %in% data1_filtered_duplicate_rows$recordid, ]
+
+# Remove duplicate rows from data[[1]] and append the filtered rows
+data1_non_duplicate_rows <- data[[1]][!data[[1]]$recordid %in% duplicate_recordid1, ]
+data1_final_data <- bind_rows(data1_non_duplicate_rows, data1_filtered_rows)
+
+# Ensure no duplicates remain
+data1_final_data <- data1_final_data[!duplicated(data1_final_data$recordid), ]
+
+# Update data[[1]] with the final result
+data[[1]] <- data1_final_data
+
+# -----------------------------------------
+# Create baseline dataset
+df_baseline <- matrix(NA, nrow = nrow(data[[1]]), ncol = 20)
+colnames(df_baseline) <- c("recordid", "date_enrolment",
+                           "age_raw", "age_new", "age_group", 
+                           "age_display", "age_unit",
+                           "country_ab", "country", 
+                           "country_region", "country_income",
+                           "sex", "hpd_adm_date", "hpd_hosp_date",
+                           "hpd_admtype", "hpd_admreason", 
+                           "comorbidities_CCI", "siteid", "cpis_score", 
+                           "cmb_overnight_rhc_surgery")
+
+# recordid
+df_baseline[,"recordid"] <- data[[1]]$recordid
+
+# Date of enrollment
+df_baseline[,"date_enrolment"] <- as.character(data[[1]]$dmdtc)
+
+# Age
+# "age_raw"
+system.time({
+  for (i in 1:nrow(data[[1]])) {
+    if (!is.na(data[[1]]$brthdtc[i])) {
+      df_baseline[i,"age_raw"] <- interval(data[[1]]$brthdtc[i], data[[1]]$dmdtc[i])/years(1)
+    } else {
+      data[[1]]$agey[which(is.na(data[[1]]$agey))] <- 0
+      data[[1]]$agem[which(is.na(data[[1]]$agem))] <- 0
+      data[[1]]$aged[which(is.na(data[[1]]$aged))] <- 0
+      df_baseline[i,"age_raw"] <- data[[1]]$agey[i]+data[[1]]$agem[i]/12+data[[1]]$aged[i]/365
+    } 
+  }
+})
+# Trans "age_raw" to numeric
+numeric_vector <- vector()
+
+for (char in df_baseline[,"age_raw"]) {
+  num <- as.numeric(gsub('"', '', char))
+  numeric_vector <- c(numeric_vector, num)
+}
+
+# "age_new"
+system.time({
+  df_baseline[,"age_new"] <- ifelse(numeric_vector >= 1, floor(numeric_vector), 
+                             ifelse(numeric_vector > 0, round(numeric_vector, 3), NA))
+})
+
+# "age_group" (Adults, Child and Neonatal)
+system.time({
+  df_baseline[,"age_group"] <- ifelse(numeric_vector >= 18, 1,
+                                      ifelse(numeric_vector > 28/365 & numeric_vector < 18, 2,
+                                             ifelse(numeric_vector > 0 & numeric_vector <= 28/365, 3, NA)))
+})
+
+
+# Age display (for neonatal days)
+for (i in 1:nrow(data[[1]])) {
+  grp <- df_baseline[i, "age_group"]
+  
+  if (!is.na(grp)) {
+    if (grp %in% c(1, 2)) {
+      # Adults & children: use age_new (years)
+      df_baseline[i, "age_display"] <- df_baseline[i, "age_new"]
+      df_baseline[i, "age_unit"]    <- "years"
+      
+    } else if (grp == 3) {
+      # Neonates: exact days
+      if (!is.na(data[[1]]$brthdtc[i]) && !is.na(data[[1]]$dmdtc[i])) {
+        df_baseline[i, "age_display"] <- as.numeric(interval(data[[1]]$brthdtc[i],
+                                                             data[[1]]$dmdtc[i]) / days(1))
+      } else {
+        df_baseline[i, "age_display"] <- data[[1]]$aged[i]
+      }
+      df_baseline[i, "age_unit"] <- "days"
+    }
+  }
+}
+
+# --------
+# Revise error site id
+data[[1]]$f07m_siteid_1[which(data[[1]]$f07m_siteid_1 == "PH003")] <- "PK003"
+# --------
+# "country_ab" 
+df_baseline[,"country_ab"] <- substr(data[[1]]$f07m_siteid_1, 1, 2)
+# Revise country_ab of Mongolia and Sri Lanka
+df_baseline[,"country_ab"] <- ifelse(df_baseline[,"country_ab"] == "MG", "MN",
+                                     ifelse(df_baseline[,"country_ab"] == "SL", "LK",
+                                            df_baseline[,"country_ab"]))
+
+# Trans to country names
+df_baseline[,"country"] <- countrycode(df_baseline[,"country_ab"], 
+                                       origin = 'iso2c',  
+                                       destination = 'cldr.name.en')
+
+# Add country region based on WHO
+country_to_region <- list(
+  "South-East Asian Region" = c("Indonesia", "Thailand", "Timor-Leste",
+                                "Bangladesh", "Nepal", "Sri Lanka", "India"),
+  
+  "Western Pacific Region" = c("Singapore", "Brunei", "Cambodia",
+                               "Malaysia","Philippines", "Vietnam", 
+                               "Hong Kong SAR China", "Japan", 
+                               "Mongolia", "Taiwan", "China"),
+  
+  "Eastern Mediterranean Region" = c("Pakistan")
+)
+
+#
+df_baseline[,"country_region"] <- sapply(df_baseline[,"country"], function(country) {
+  for (region in names(country_to_region)) {
+    if (country %in% country_to_region[[region]]) {
+      return(region)
+    }
+  }
+  return(NA)  
+})
+
+# World bank income status
+country_to_income <- list(
+  "High income" = c("Singapore", "Brunei", "Hong Kong SAR China", "Japan", "Taiwan"),
+  "Upper middle income" = c("Mongolia", "Malaysia", "Thailand", "China", "Indonesia"),
+  "Lower middle income" = c("Bangladesh", "Nepal", "Cambodia", 
+                            "Philippines", "Pakistan", "Sri Lanka", 
+                            "Timor-Leste", "Vietnam", "India")
+)
+
+# 
+df_baseline[,"country_income"] <- sapply(df_baseline[,"country"], function(country) {
+  for (income in names(country_to_income)) {
+    if (country %in% country_to_income[[income]]) {
+      return(income)
+    }
+  }
+  return(NA)  
+})
+
+# Sex
+df_baseline[,"sex"] <- data[[1]]$sex
+
+# Date of admission
+df_hpd_adm_date <- as.Date(data[[1]]$hpd_adm_date, format="%Y-%m-%d")
+df_baseline[,"hpd_adm_date"] <- as.character(df_hpd_adm_date)
+
+# Date of hospitalisation (if transfer from another facility)
+df_hpd_hosp_date <- as.Date(data[[1]]$hpd_hosp_date, format="%Y-%m-%d")
+df_baseline[,"hpd_hosp_date"] <- as.character(df_hpd_hosp_date)
+
+# Admission type 
+df_baseline[,"hpd_admtype"] <- data[[1]]$hpd_admtype
+
+# Primary admission reason
+df_baseline[,"hpd_admreason"] <- data[[1]]$hpd_admreason
+
+# Comorbidities (Charlson score)
+cmb_comorbidities <- data[[1]] %>%
+  select(starts_with("cmb_comorbidities"))
+
+system.time({
+  for (i in 1:nrow(data[[1]])) {
+    if (data[[1]]$cmb_comorbidities___none[i] == 1) {
+      
+      df_baseline[i,"comorbidities_CCI"] <- 0
+      
+    } else if (data[[1]]$cmb_comorbidities___none[i] == 0) {
+      
+      df_baseline[i,"comorbidities_CCI"] <- 
+        2*data[[1]]$cmb_comorbidities___cog[i] + 
+        2*data[[1]]$cmb_comorbidities___dem[i] +
+        data[[1]]$cmb_comorbidities___cpd[i] + 
+        data[[1]]$cmb_comorbidities___rheu[i] + 
+        0*data[[1]]$cmb_comorbidities___pep[i] +
+        2*data[[1]]$cmb_comorbidities___mld[i] +
+        0*data[[1]]$cmb_comorbidities___diab[i] +
+        data[[1]]$cmb_comorbidities___diad[i] +
+        2*data[[1]]$cmb_comorbidities___hop[i] +
+        data[[1]]$cmb_comorbidities___renal[i] + 
+        2*data[[1]]$cmb_comorbidities___onc[i] +
+        4*data[[1]]$cmb_comorbidities___liv[i] +
+        6*data[[1]]$cmb_comorbidities___mst[i] +
+        4*data[[1]]$cmb_comorbidities___aids[i]+
+        0*data[[1]]$cmb_comorbidities___oth[i]
+      
+    } else {
+      
+    }
+  }
+})
+
+# Siteid
+df_baseline[,"siteid"] <- data[[1]]$f07m_siteid_1
+
+## Trans to data.frame
+df_baseline <- cbind.data.frame(df_baseline, cmb_comorbidities)
+
+# Add infection types and onset date to baseline ("infection_types", "inf_onset")
+df_baseline <- left_join(df_baseline, inf_add, by = "recordid")
+
+# Check for healthcare-associated BSI
+df_baseline[,"cmb_overnight_rhc_surgery"] <- apply(data[[1]][, c("cmb_overnight", "cmb_rhc", "cmb_surgery")],
+  1,
+  function(x) {
+    if ("Y" %in% x) {
+      return("Y")
+    } else if ("N" %in% x) {
+      return("N")
+    } else if ("UNK" %in% x) {
+      return("UNK")
+    } else {
+      return(NA)
+    }
+  }
+)
+
+#####
+# SOFA (F07a, F07b)
+# Function for sum up with NA
+rowSumsWithNA <- function(x) {
+  apply(x, 1, function(row) if (any(is.na(row))) NA else sum(row, na.rm = TRUE))
+}
+###
+# Index sofa raw data
+sofa_bsi <- data[[5]][which(data[[5]]$redcap_repeat_instance == 1),] %>% 
+  select("recordid", starts_with("sofa_"))
+sofa_vap <- data[[6]][which(data[[6]]$redcap_repeat_instance == 1),] %>% 
+  select("recordid", starts_with("sofa_")) 
+# Retain index rows based on infection types
+sofa_vap_id <- inf_add %>%
+  filter(infection_types == "VAP") %>%
+  pull(recordid)
+
+sofa_bsi_id <- inf_add %>%
+  filter(infection_types %in% c("Hospital-acquired BSI", "Healthcare-associated BSI")) %>%
+  pull(recordid)
+#
+sofa_bsi <- sofa_bsi[sofa_bsi$recordid %in% sofa_bsi_id,]
+sofa_vap <- sofa_vap[sofa_vap$recordid %in% sofa_vap_id,]
+# Standardize column names
+colnames(sofa_bsi) <- gsub("_bsi", "", colnames(sofa_bsi))
+colnames(sofa_vap) <- gsub("_vap", "", colnames(sofa_vap))
+# Combine the data frames
+sofa_all <- rbind(sofa_bsi, sofa_vap)
+#
+sofa_new <- matrix(NA, nrow = nrow(sofa_all), ncol = 8)
+colnames(sofa_new) <- c("recordid", "score_respiration", 
+                        "score_coagulation", "score_liver",
+                        "score_CVS", "score_CNV",
+                        "score_renal", "sofa_score")
+
+## recordid
+sofa_new[,"recordid"] <- sofa_all$recordid
+
+## respiration
+# Combine 
+sofa_all$sofa_score_1_1 <- ifelse(is.na(sofa_all$sofa_score_1_1), sofa_all$sofa_score_1_1_2, sofa_all$sofa_score_1_1)
+#
+sofa_new[,"score_respiration"] <- as.numeric(sofa_all$sofa_score_1_1)
+
+## coagulation
+sofa_new[,"score_coagulation"] <- as.numeric(ifelse(is.na(sofa_all$sofa_score_2_1), 0, sofa_all$sofa_score_2_1))
+
+## liver
+# Combine
+sofa_all$sofa_score_3_1 <- ifelse(is.na(sofa_all$sofa_score_3_1), sofa_all$sofa_score_3_1_2, sofa_all$sofa_score_3_1)
+
+sofa_all$sofa_score_3_1_3 <- ifelse(is.na(sofa_all$sofa_score_3_1_3), sofa_all$sofa_score_3_1, sofa_all$sofa_score_3_1_3)
+#
+sofa_new[,"score_liver"] <- as.numeric(sofa_all$sofa_score_3_1_3)
+
+## CVS
+system.time({
+  
+  # MAP<70 mmHg 
+  condition2 <- !is.na(sofa_all$sofa_map) & sofa_all$sofa_map < 70
+  sofa_new[condition2, "score_CVS"] <- 1
+  
+  # Dopamine <5 or dobutamine (any dose)
+  condition3 <- (sofa_all$sofa_car_dop_1 <= 5) | (sofa_all$sofa_car_dob == 1)
+  sofa_new[condition3, "score_CVS"] <- 2
+  
+  # Dopamine >5 or epinephrine <0.1 or norepinephrine <0.1 
+  condition4 <- ((sofa_all$sofa_car_dop_1 > 5) & (sofa_all$sofa_car_dop_1 <= 15)) | (sofa_all$sofa_car_epi_1 <= 0.1) | (sofa_all$sofa_car_nor_1 <= 0.1)
+  sofa_new[condition4, "score_CVS"] <- 3
+  
+  # Dopamine >15 or epinephrine >0.1 or norepinephrine >0.1 
+  condition5 <- (sofa_all$sofa_car_dop_1 > 15) | (sofa_all$sofa_car_epi_1 > 0.1) | (sofa_all$sofa_car_nor_1 > 0.1)
+  sofa_new[condition5, "score_CVS"] <- 4
+
+  # sofa_map >= 70 or no use (dopamine, dobutamine, epinephrine, norepinephrine)
+  condition1 <- (!is.na(sofa_all$sofa_map) & sofa_all$sofa_map >= 70) | (sofa_all$sofa_car_dop == 0)| (sofa_all$sofa_car_dob == 0) | (sofa_all$sofa_car_nor == 0)
+  sofa_new[condition1, "score_CVS"] <- 0
+  
+})
+
+## CNV
+# Sum up
+sofa_all$sofa_cen_total <- rowSumsWithNA(cbind(sofa_all$sofa_cen_1, sofa_all$sofa_cen_2, sofa_all$sofa_cen_3))
+# Set different scores for CNV
+system.time({
+  for (i in 1:nrow(sofa_all)) {
+    if (is.na(sofa_all$sofa_cen_total[i])) {
+      # For NA
+      sofa_new[i, "score_CNV"] <- 0
+    } else if (sofa_all$sofa_cen_total[i] > 14) {
+      sofa_new[i, "score_CNV"] <- 0
+    } else if ((sofa_all$sofa_cen_total[i] == 14) | (sofa_all$sofa_cen_total[i] == 13)) {
+      sofa_new[i, "score_CNV"] <- 1
+    } else if ((sofa_all$sofa_cen_total[i] <= 12) & (sofa_all$sofa_cen_total[i] >= 10)) {
+      sofa_new[i, "score_CNV"] <- 2
+    } else if ((sofa_all$sofa_cen_total[i] <= 9) & (sofa_all$sofa_cen_total[i] >= 6)) {
+      sofa_new[i, "score_CNV"] <- 3
+    } else if (sofa_all$sofa_cen_total[i] <= 5) {
+      sofa_new[i, "score_CNV"] <- 4
+    }
+  }
+})
+
+## renal
+# Combine
+sofa_all$sofa_score_6_1 <- ifelse(is.na(sofa_all$sofa_score_6_1), sofa_all$sofa_score_6_1_2, sofa_all$sofa_score_6_1)
+#
+sofa_new[, "score_renal"] <- as.numeric(as.character(sofa_all$sofa_score_6_1))
+
+sofa_new[, "score_renal"][is.na(sofa_new[, "score_renal"])] <- 0
+
+## Total SOFA scores
+sofa_new <- as.data.frame(sofa_new)
+
+sofa_items <- c("score_respiration", "score_coagulation", "score_liver",
+                "score_CVS", "score_CNV", "score_renal")
+sofa_items_indices <- which(names(sofa_new) %in% sofa_items)
+
+for (i in sofa_items_indices) {sofa_new[, i] = as.numeric(as.character(sofa_new[, i]))}
+#
+sofa_new[,"sofa_score"] <- rowSumsWithNA(sofa_new[, sofa_items_indices])
+
+#####
+## Severity score and admission ward types
+# Clinical severity signs (qSOFA for adults, sepsis six recognition features for children, general WHO severity signs for neonates)
+# Retain index rows based on organism types
+severity_used <- data[[2]][which(data[[2]]$redcap_repeat_instance == 1),]
+
+df_severity_bsi <- severity_used[which(severity_used$redcap_event_name %in% "bsi_episode_arm_1"),]
+df_severity_vap <- severity_used[which(severity_used$redcap_event_name %in% "vap_episode_arm_1"),]
+
+severity_bsi <- df_severity_bsi[df_severity_bsi$recordid %in% sofa_bsi_id,]
+severity_vap <- df_severity_vap[df_severity_vap$recordid %in% sofa_vap_id,]
+
+severity <- rbind(severity_vap, severity_bsi)
+
+# Add age group (severity calculation varies across different age groups)
+severity <- left_join(severity, df_baseline[,c("recordid", "age_group")], by = "recordid")
+# 
+severity_new <- matrix(NA, nrow = nrow(severity), ncol = 5)
+colnames(severity_new) <- c("recordid", "adm_ward_types_ori", "adm_ward_types_new",
+                            "severity_score", "severity_score_scale")
+#
+severity_new[,"recordid"] <- severity$recordid
+# Admission ward types
+severity_new[, "adm_ward_types_ori"] <- severity$hpd_adm_wardtype
+
+# ICU OR non-ICU
+severity_new[, "adm_ward_types_new"] <- ifelse(
+  grepl("ICU", severity$hpd_adm_wardtype), 
+  "ICU", 
+  ifelse(
+    is.na(severity$hpd_adm_wardtype), 
+    NA, 
+    "General ward"
+  )
+)
+
+# Conversion function ("Y" to 1, "N" or "UNK" to 0)
+convert_to_binary <- function(value) {
+  if (is.na(value) || value == "") {
+    return(NA)
+  } else if (value == "Y") {
+    return(1)
+  } else {
+    return(0)
+  }
+}
+
+# List of columns to convert from severity
+columns_severity <- c("ser_gcs_under15", "ser_rr_22up", "ser_sbp_under100", 
+                      "ser_abnormal_temp", "ser_inapp_tachycardia", 
+                      "ser_alter_mental", "ser_reduce_pp",
+                      "ser_neo_reduce", "ser_neo_feed", "ser_neo_convul")
+
+# Apply the conversion function to each column in severity
+for (column in columns_severity) {
+  new_column <- paste0(column, "_new")
+  severity[[new_column]] <- unlist(lapply(severity[[column]], convert_to_binary))
+}
+
+# Define age groups, ensuring no NAs
+age_adult <- !is.na(severity$age_group) & severity$age_group == 1
+age_child <- !is.na(severity$age_group) & severity$age_group == 2
+age_neo <- !is.na(severity$age_group) & severity$age_group == 3
+
+# Apply row sums to the appropriate rows based on age groups
+severity_new[age_adult, "severity_score"] <- rowSumsWithNA(severity[age_adult, c("ser_gcs_under15_new", "ser_rr_22up_new", "ser_sbp_under100_new")])
+
+severity_new[age_child, "severity_score"] <- rowSumsWithNA(severity[age_child, c("ser_abnormal_temp_new", "ser_inapp_tachycardia_new", "ser_alter_mental_new", "ser_reduce_pp_new")])
+
+severity_new[age_neo, "severity_score"] <- rowSumsWithNA(severity[age_neo, c("ser_neo_reduce_new", "ser_neo_feed_new", "ser_neo_convul_new")])
+
+# Trans chr to num
+severity_new <- as.data.frame(severity_new)
+severity_new[, "severity_score"] <- as.numeric(severity_new[, "severity_score"])
+
+# scale severity scores
+scale_severity <- function(data, age_group) {
+  if (any(!is.na(data[age_group, "severity_score"]))) {
+    max_score <- max(data[age_group, "severity_score"], na.rm = TRUE)
+    data[age_group, "severity_score_scale"] <- ifelse(is.na(data[age_group, "severity_score"]), 
+                                                   NA, 
+                                                   12 * data[age_group, "severity_score"] / max_score)
+  }
+  return(data)
+}
+
+# Apply function to each age group
+severity_new <- scale_severity(severity_new, age_adult)
+severity_new <- scale_severity(severity_new, age_child)
+severity_new <- scale_severity(severity_new, age_neo)
+
+#####
+## CPIS score for VAP (F07b, F02)
+## Age categories (years old): (1) > 12, (2) <= 1, (3) > 1 to <= 12
+# Index data
+cpis_used <- data[[6]][which(data[[6]]$redcap_repeat_instance == 1),]
+cpis_raw <- cpis_used[cpis_used$recordid %in% sofa_vap_id,]
+
+cpis_add_temp <- severity[, c("recordid", "ser_abnormal_temp_adult", "ser_abnormal_temp")]
+cpis_add_ps <- sofa_vap[, c("recordid", "sofa_res_3")]
+
+cpis_add_list <- list(cpis_raw, cpis_add_temp, cpis_add_ps)
+cpis_raw <- reduce(cpis_add_list, left_join, by = "recordid")
+
+###
+cpis_new <- matrix(NA, nrow = nrow(cpis_raw), ncol = 8)
+colnames(cpis_new) <- c("recordid", 
+                        "temperature", "wbc", "tracheal_secretion", 
+                        "pa_fi", "pulmonary_radiography", "culture_ta",
+                        "cpis_score")
+
+# recordid
+cpis_new[,"recordid"] <- cpis_raw$recordid
+
+# Trans to 1,0
+columns_cpis <- c("temp_cxr", "ser_abnormal_temp_adult", 
+                  "temp_ins", "fev_hyp", "ser_abnormal_temp",
+                  "white_bc", "leu", "leu_1",
+                  "new_onset_ps", "new_onset_ps_1",
+                  "wor_ge", "wor_ge_1", "wor_ge_2",
+                  "cxr_1")
+
+# Apply the conversion function to each column in severity
+for (column in columns_cpis) {
+  new_column <- paste0(column, "_new")
+  cpis_raw[[new_column]] <- unlist(lapply(cpis_raw[[column]], convert_to_binary))
+}
+
+# temperature
+# Define a helper function to create temp groups
+create_temp_group <- function(data, col1, col2) {
+  ifelse(
+    data[[col1]] == 1 | data[[col2]] == 1, 
+    1,
+    ifelse(
+      (data[[col1]] == 0 | data[[col2]] == 0) & 
+      !(data[[col1]] == 1 | data[[col2]] == 1), 
+      0, 
+      NA
+    )
+  )
+}
+
+# Apply the helper function to create temp groups
+cpis_raw$temp_group_1 <- create_temp_group(cpis_raw, "ser_abnormal_temp_adult_new", "temp_cxr_new")
+cpis_raw$temp_group_2 <- create_temp_group(cpis_raw, "ser_abnormal_temp_new", "temp_ins_new")
+cpis_raw$temp_group_3 <- create_temp_group(cpis_raw, "ser_abnormal_temp_new", "fev_hyp_new")
+
+# Use coalesce to combine temp groups
+cpis_new[,"temperature"] <- coalesce(cpis_raw$temp_group_1, cpis_raw$temp_group_2, cpis_raw$temp_group_3)
+
+# WBC
+cpis_new[,"wbc"] <- coalesce(cpis_raw$white_bc_new, cpis_raw$leu_new, cpis_raw$leu_1_new)
+
+# tracheal_secretion
+cpis_new[,"tracheal_secretion"] <- coalesce(cpis_raw$new_onset_ps_new, cpis_raw$new_onset_ps_1_new)
+
+# PaO2/FiO2
+ cpis_raw$wor_ge_group_1 <-  ifelse(
+  cpis_raw$sofa_res_3 <= 240 | cpis_raw$wor_ge_new == 1, 
+  1,
+  ifelse(
+    (cpis_raw$sofa_res_3 > 240 | cpis_raw$wor_ge_new == 0) & 
+    !(cpis_raw$sofa_res_3 <= 240 | cpis_raw$wor_ge_new == 1), 
+    0, 
+    NA
+  )
+)
+
+cpis_new[,"pa_fi"] <- coalesce(cpis_raw$wor_ge_group_1, cpis_raw$wor_ge_1_new, cpis_raw$wor_ge_2_new)
+
+# Pulmonary radiography
+cpis_new[,"pulmonary_radiography"] <- cpis_raw$cxr_1_new
+
+# Set 0 in the new onset of purulent sputum or change in character of sputum (second group)
+cpis_new_na.ps <- which(is.na(cpis_new[, "tracheal_secretion"])) # 0
+cpis_new[cpis_new_na.ps, "tracheal_secretion"] <- 0
+
+#####
+## PITT for BSI (F07a)
+# Calculation on PITT itemwise score
+# Index
+pitt_used <- data[[5]][which(data[[5]]$redcap_repeat_instance == 1),]
+
+pitt_raw <- pitt_used[pitt_used$recordid %in% sofa_bsi_id,]
+#
+pitt_new <- matrix(NA, nrow = nrow(pitt_raw), ncol = 14)
+colnames(pitt_new) <- c("recordid", 
+                        "temp", "hypotension", "mv", 
+                        "cardiac", "mental", "pitt_score",
+                        "res_qpitt", "sys_qpitt", "mental_qpitt",
+                        "temp_qpitt", "ca_qpitt", "qpitt_score", "UTI_source")
+
+# recordid
+pitt_new[,"recordid"] <- pitt_raw$recordid
+
+# source
+pitt_new[,"UTI_source"] <- pitt_raw$bsi_pri_sec_1___4
+
+# Temperature
+system.time({
+  pitt_new[,"temp"] <- ifelse(
+    !is.na(pitt_raw$temp_1) & pitt_raw$temp_1 >= 36.1 & pitt_raw$temp_1 <= 38.9, 0,
+    ifelse(
+      !is.na(pitt_raw$temp_1) & ((pitt_raw$temp_1 >= 35.1 & pitt_raw$temp_1 <= 36) | (pitt_raw$temp_1 >= 39 & pitt_raw$temp_1 <= 39.9)), 1,
+      ifelse(!is.na(pitt_raw$temp_1) & (pitt_raw$temp_1 <= 35 | pitt_raw$temp_1 >= 40), 2, NA)
+    )
+  )
+})
+
+# "hypotension" (acute hypotensive event, IV agents required, SBP<90 mmHg)
+condition_hyp <- (pitt_raw$acute == 1) | (pitt_raw$iv_agents == 1) | (pitt_raw$sys_bp_1 < 90)
+condition_hyp_other <- (pitt_raw$acute %in% c(2,3)) | (pitt_raw$iv_agents %in% c(2,3)) | (pitt_raw$sys_bp == 2) | (pitt_raw$sys_bp_1 >= 90)
+
+pitt_new[condition_hyp, "hypotension"] <- 2
+pitt_new[condition_hyp_other, "hypotension"] <- 0
+
+# mechanical ventilation
+condition_mv <- pitt_raw$mv == 1
+condition_mv_other <- pitt_raw$mv %in% c(2,3)
+
+pitt_new[condition_mv, "mv"] <- 2
+pitt_new[condition_mv_other, "mv"] <- 0
+
+# cardiac arrest
+condition_ca <- pitt_raw$ca == 1
+condition_ca_other <- pitt_raw$ca %in% c(2,3)
+
+pitt_new[condition_ca, "cardiac"] <- 4
+pitt_new[condition_ca_other, "cardiac"] <- 0
+
+# mental
+pitt_new[, "mental"] <- ifelse(pitt_raw$men_sta %in% c(1,5), 0,
+                               ifelse(pitt_raw$men_sta == 2, 1,
+                                      ifelse(pitt_raw$men_sta == 3, 2,
+                                             ifelse(pitt_raw$men_sta == 4, 4, NA))))
+
+#####
+## qPITT for BSI
+# "res_qpitt"
+condition_res_qpitt <- (pitt_raw$res_rate_1 >= 25) | (pitt_raw$mv == 1)
+condition_res_qpitt_other <-  (pitt_raw$res_rate == 2) | (pitt_raw$res_rate_1 < 25) | (pitt_raw$mv %in% c(2,3))
+
+pitt_new[condition_res_qpitt, "res_qpitt"] <- 1
+pitt_new[condition_res_qpitt_other, "res_qpitt"] <- 0
+
+# "sys_qpitt"
+condition_sys_qpitt <- pitt_raw$sys_bp_1 <= 90
+condition_sys_qpitt_other <- (pitt_raw$sys_bp == 2) | (pitt_raw$sys_bp_1 > 90)
+
+pitt_new[condition_sys_qpitt, "sys_qpitt"] <- 1
+pitt_new[condition_sys_qpitt_other, "sys_qpitt"] <- 0
+
+# "mental_qpitt"
+condition_mental_qpitt <- pitt_raw$men_sta == 1
+condition_mental_qpitt_other <- pitt_raw$men_sta %in% c(2:5)
+
+pitt_new[condition_mental_qpitt, "mental_qpitt"] <- 1
+pitt_new[condition_mental_qpitt_other, "mental_qpitt"] <- 0
+
+# "temp_qpitt
+condition_temp_qpitt <- pitt_raw$temp_1 < 36
+condition_temp_qpitt_other <- (pitt_raw$temp == 2) | (pitt_raw$temp_1 >= 36)
+
+pitt_new[condition_temp_qpitt, "temp_qpitt"] <- 1
+pitt_new[condition_temp_qpitt_other, "temp_qpitt"] <- 0
+
+# "ca_qpitt"
+condition_ca_qpitt <- pitt_raw$ca == 1
+condition_ca_qpitt_other <- pitt_raw$ca %in% c(2,3)
+
+pitt_new[condition_ca_qpitt, "ca_qpitt"] <- 1
+pitt_new[condition_ca_qpitt_other, "ca_qpitt"] <- 0
+#
+pitt_new <- as.data.frame(pitt_new)
+
+###
+# Sum up of PITT and qPITT
+pitt_col <- c("temp", "hypotension", "mv", "cardiac", "mental")
+qpitt_col <- c("res_qpitt", "sys_qpitt", "mental_qpitt", "temp_qpitt", "ca_qpitt")
+#
+pitt_col_indices <- which(names(pitt_new) %in% pitt_col)
+qpitt_col_indices <- which(names(pitt_new) %in% qpitt_col)
+col_indices <- c(pitt_col_indices, qpitt_col_indices)
+
+for (i in col_indices) {pitt_new[, i] = as.numeric(as.character(pitt_new[, i]))}
+pitt_new[, "pitt_score"] <- rowSumsWithNA(pitt_new[, pitt_col_indices])
+pitt_new[, "qpitt_score"] <- rowSumsWithNA(pitt_new[, qpitt_col_indices])
+
+#####
+## EQ-5D-3L for subject alive prior to day 28 from last infection
+## subject more than 12 years old (func_status_fo == 1 & sub_died_pri_day28 == 2)
+## FBIS scores (func_status_fo == 1)
+
+# All five EQ-5D-3L dimensions are level 1 (with no NA)
+is_11111 <- function(df) {
+  vals <- cbind(df$eq_fo, df$eq_fo_1, df$eq_fo_2, df$eq_fo_3, df$eq_fo_4)
+  rowSums(vals == 1) == 5 & rowSums(is.na(vals)) == 0
+}
+
+# Data join
+eq_raw <- dplyr::left_join(
+  data[[8]],
+  df_baseline[, c("recordid", "country")],
+  by = "recordid"
+)
+
+eq_new <- matrix(
+  NA_real_,
+  nrow = nrow(eq_raw),
+  ncol = 9,
+  dimnames = list(
+    NULL,
+    c("recordid", "sub_died_pri_day28",
+      "eq_5d_3l_1", "eq_5d_3l_2", "eq_5d_3l_3", "eq_5d_3l_4", "eq_5d_3l_5",
+      "eq_5d_3l", "fbis_score")
+  )
+)
+
+# Copy over identifiers and raw levels
+eq_new[, "recordid"] <- eq_raw$recordid
+eq_new[, "sub_died_pri_day28"] <- eq_raw$sub_died_pri_day28
+eq_new[, "eq_5d_3l_1"] <- eq_raw$eq_fo
+eq_new[, "eq_5d_3l_2"] <- eq_raw$eq_fo_1
+eq_new[, "eq_5d_3l_3"] <- eq_raw$eq_fo_2
+eq_new[, "eq_5d_3l_4"] <- eq_raw$eq_fo_3
+eq_new[, "eq_5d_3l_5"] <- eq_raw$eq_fo_4
+
+# Subject is alive prior to day 28 AND func_status_fo == 1
+eq_condition <- (eq_raw$sub_died_pri_day28 == 2) & (eq_raw$func_status_fo == 1)
+
+# ----------------------------
+# Singapore (incl. Brunei, Hong Kong SAR China)
+# ----------------------------
+SG_ori <- eq_raw$country %in% c("Singapore", "Brunei", "Hong Kong SAR China")
+SG <- SG_ori & !is.na(eq_condition) & eq_condition
+SG_idx <- which(SG)
+
+disut_mo_sg <- ifelse(SG & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.1678,
+                                    ifelse(eq_raw$eq_fo==3, 0.3040, NA_real_))),
+                      NA_real_)
+disut_sc_sg <- ifelse(SG & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.1615,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.3465, NA_real_))),
+                      NA_real_)
+disut_ua_sg <- ifelse(SG & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.2555,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.3209, NA_real_))),
+                      NA_real_)
+disut_pd_sg <- ifelse(SG & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.1462,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.2291, NA_real_))),
+                      NA_real_)
+disut_ad_sg <- ifelse(SG & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.1501,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.2784, NA_real_))),
+                      NA_real_)
+
+n3_sg <- ifelse(
+  SG,
+  as.numeric(rowSums(cbind(eq_raw$eq_fo==3,
+                           eq_raw$eq_fo_1==3,
+                           eq_raw$eq_fo_2==3,
+                           eq_raw$eq_fo_3==3,
+                           eq_raw$eq_fo_4==3), na.rm = TRUE) > 0) * 0.2905,
+  NA_real_
+)
+
+eq_index_sg <- 1 - (disut_mo_sg + disut_sc_sg + disut_ua_sg + disut_pd_sg + disut_ad_sg + n3_sg)
+eq_index_sg[SG & is_11111(eq_raw)] <- 1
+eq_new[SG_idx, "eq_5d_3l"] <- round(eq_index_sg[SG_idx], 3)
+
+# ----------------------------
+# Japan
+# ----------------------------
+JP_ori <- eq_raw$country == "Japan"
+JP <- JP_ori & !is.na(eq_condition) & eq_condition
+JP_idx <- which(JP)
+
+disut_mo_jp <- ifelse(JP & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.075,
+                                    ifelse(eq_raw$eq_fo==3, 0.418, NA_real_))),
+                      NA_real_)
+disut_sc_jp <- ifelse(JP & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.054,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.102, NA_real_))),
+                      NA_real_)
+disut_ua_jp <- ifelse(JP & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.044,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.133, NA_real_))),
+                      NA_real_)
+disut_pd_jp <- ifelse(JP & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.080,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.194, NA_real_))),
+                      NA_real_)
+disut_ad_jp <- ifelse(JP & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.063,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.112, NA_real_))),
+                      NA_real_)
+
+eq_index_jp <- 1 - 0.152 - (disut_mo_jp + disut_sc_jp + disut_ua_jp + disut_pd_jp + disut_ad_jp)
+eq_index_jp[JP & is_11111(eq_raw)] <- 1
+eq_new[JP_idx, "eq_5d_3l"] <- round(eq_index_jp[JP_idx], 3)
+
+# ----------------------------
+# Taiwan
+# ----------------------------
+TW_ori <- eq_raw$country == "Taiwan"
+TW <- TW_ori & !is.na(eq_condition) & eq_condition
+TW_idx <- which(TW)
+
+disut_mo_tw <- ifelse(TW & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.123,
+                                    ifelse(eq_raw$eq_fo==3, 0.272, NA_real_))),
+                      NA_real_)
+disut_sc_tw <- ifelse(TW & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.167,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.276, NA_real_))),
+                      NA_real_)
+disut_ua_tw <- ifelse(TW & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.085,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.208, NA_real_))),
+                      NA_real_)
+disut_pd_tw <- ifelse(TW & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.121,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.261, NA_real_))),
+                      NA_real_)
+disut_ad_tw <- ifelse(TW & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.154,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.282, NA_real_))),
+                      NA_real_)
+
+n3_tw <- ifelse(
+  TW,
+  as.numeric(rowSums(cbind(eq_raw$eq_fo==3,
+                           eq_raw$eq_fo_1==3,
+                           eq_raw$eq_fo_2==3,
+                           eq_raw$eq_fo_3==3,
+                           eq_raw$eq_fo_4==3), na.rm = TRUE) > 0) * 0.19,
+  NA_real_
+)
+
+eq_index_tw <- 1 - 0.185 - (disut_mo_tw + disut_sc_tw + disut_ua_tw + disut_pd_tw + disut_ad_tw + n3_tw)
+eq_index_tw[TW & is_11111(eq_raw)] <- 1
+eq_new[TW_idx, "eq_5d_3l"] <- round(eq_index_tw[TW_idx], 3)
+
+# ----------------------------
+# China
+# ----------------------------
+CN_ori <- eq_raw$country == "China"
+CN <- CN_ori & !is.na(eq_condition) & eq_condition
+CN_idx <- which(CN)
+
+disut_mo_cn <- ifelse(CN & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.0766,
+                                    ifelse(eq_raw$eq_fo==3, 0.2668, NA_real_))),
+                      NA_real_)
+disut_sc_cn <- ifelse(CN & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.0441,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.2912, NA_real_))),
+                      NA_real_)
+disut_ua_cn <- ifelse(CN & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.0370,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.0538, NA_real_))),
+                      NA_real_)
+disut_pd_cn <- ifelse(CN & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.0274,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.0409, NA_real_))),
+                      NA_real_)
+disut_ad_cn <- ifelse(CN & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.0359,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.1771, NA_real_))),
+                      NA_real_)
+
+eq_index_cn <- 1 - (disut_mo_cn + disut_sc_cn + disut_ua_cn + disut_pd_cn + disut_ad_cn)
+eq_new[CN_idx, "eq_5d_3l"] <- round(eq_index_cn[CN_idx], 3)
+
+# ----------------------------
+# Thailand (incl. Mongolia, Indonesia)
+# ----------------------------
+TH_ori <- eq_raw$country %in% c("Thailand", "Mongolia", "Indonesia")
+TH <- TH_ori & !is.na(eq_condition) & eq_condition
+TH_idx <- which(TH)
+
+mo <- ifelse(TH & eq_raw$eq_fo   == 2, 1, ifelse(TH & eq_raw$eq_fo   == 3, 2, 0))
+sc <- ifelse(TH & eq_raw$eq_fo_1 == 2, 1, ifelse(TH & eq_raw$eq_fo_1 == 3, 2, 0))
+ua <- ifelse(TH & eq_raw$eq_fo_2 == 2, 1, ifelse(TH & eq_raw$eq_fo_2 == 3, 2, 0))
+pd <- ifelse(TH & eq_raw$eq_fo_3 == 2, 1, ifelse(TH & eq_raw$eq_fo_3 == 3, 2, 0))
+ad <- ifelse(TH & eq_raw$eq_fo_4 == 2, 1, ifelse(TH & eq_raw$eq_fo_4 == 3, 2, 0))
+
+m2 <- ifelse(TH & eq_raw$eq_fo   == 3, 1, 0)
+p2 <- ifelse(TH & eq_raw$eq_fo_3 == 3, 1, 0)
+a2 <- ifelse(TH & eq_raw$eq_fo_4 == 3, 1, 0)
+
+n3 <- ifelse(
+  TH & (eq_raw$eq_fo==3 | eq_raw$eq_fo_1==3 | eq_raw$eq_fo_2==3 |
+        eq_raw$eq_fo_3==3 | eq_raw$eq_fo_4==3),
+  1, 0
+)
+
+eq_index_th <- 1 - 0.202 -
+  (0.121 * mo) - (0.121 * sc) - (0.059 * ua) - (0.072 * pd) - (0.032 * ad) -
+  (0.190 * m2) - (0.065 * p2) - (0.046 * a2) - (0.139 * n3)
+
+eq_index_th[TH & is_11111(eq_raw)] <- 1
+eq_new[TH_idx, "eq_5d_3l"] <- round(eq_index_th[TH_idx], 3)
+
+# ----------------------------
+# Malaysia  (fixed: removed undefined 'eq_ok')
+# ----------------------------
+MY_ori <- eq_raw$country == "Malaysia"
+MY <- MY_ori & !is.na(eq_condition) & eq_condition
+MY_idx <- which(MY)
+
+disut_mo_my <- ifelse(MY & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.084,
+                                    ifelse(eq_raw$eq_fo==3, 0.191, NA_real_))),
+                      NA_real_)
+disut_sc_my <- ifelse(MY & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.097,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.160, NA_real_))),
+                      NA_real_)
+disut_ua_my <- ifelse(MY & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.053,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.122, NA_real_))),
+                      NA_real_)
+disut_pd_my <- ifelse(MY & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.054,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.127, NA_real_))),
+                      NA_real_)
+disut_ad_my <- ifelse(MY & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.081,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.086, NA_real_))),
+                      NA_real_)
+
+n3_my <- ifelse(
+  MY,
+  as.numeric(rowSums(cbind(eq_raw$eq_fo==3,
+                           eq_raw$eq_fo_1==3,
+                           eq_raw$eq_fo_2==3,
+                           eq_raw$eq_fo_3==3,
+                           eq_raw$eq_fo_4==3), na.rm = TRUE) > 0) * 0.116,
+  NA_real_
+)
+
+eq_index_my <- 1 - 0.067 - (disut_mo_my + disut_sc_my + disut_ua_my + disut_pd_my + disut_ad_my + n3_my)
+eq_index_my[MY & is_11111(eq_raw)] <- 1
+eq_new[MY_idx, "eq_5d_3l"] <- round(eq_index_my[MY_idx], 3)
+
+# ----------------------------
+# Pakistan (incl. Bangladesh, Nepal, Cambodia, Philippines, Timor-Leste, Vietnam, India)
+# ----------------------------
+PK_ori <- eq_raw$country %in% c("Pakistan","Bangladesh","Nepal","Cambodia",
+                                "Philippines","Timor-Leste","Vietnam","India")
+PK <- PK_ori & !is.na(eq_condition) & eq_condition
+PK_idx <- which(PK)
+
+disut_mo_pk <- ifelse(PK & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.049,
+                                    ifelse(eq_raw$eq_fo==3, 0.279, NA_real_))),
+                      NA_real_)
+disut_sc_pk <- ifelse(PK & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.057,
+                                    ifelse(eq_raw$eq_fo_1==3, 0.217, NA_real_))),
+                      NA_real_)
+disut_ua_pk <- ifelse(PK & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.040,
+                                    ifelse(eq_raw$eq_fo_2==3, 0.280, NA_real_))),
+                      NA_real_)
+disut_pd_pk <- ifelse(PK & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.035,
+                                    ifelse(eq_raw$eq_fo_3==3, 0.214, NA_real_))),
+                      NA_real_)
+disut_ad_pk <- ifelse(PK & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.036,
+                                    ifelse(eq_raw$eq_fo_4==3, 0.181, NA_real_))),
+                      NA_real_)
+
+eq_index_pk <- 1 - (disut_mo_pk + disut_sc_pk + disut_ua_pk + disut_pd_pk + disut_ad_pk)
+eq_new[PK_idx, "eq_5d_3l"] <- round(eq_index_pk[PK_idx], 3)
+
+# ----------------------------
+# Sri Lanka 
+# ----------------------------
+LK_ori <- eq_raw$country == "Sri Lanka"
+LK <- LK_ori & !is.na(eq_condition) & eq_condition
+LK_idx <- which(!is.na(LK) & LK)
+
+disut_mo_lk <- ifelse(LK & !is.na(eq_raw$eq_fo),
+                      ifelse(eq_raw$eq_fo==1, 0,
+                             ifelse(eq_raw$eq_fo==2, 0.166,
+                             ifelse(eq_raw$eq_fo==3, 1.071, NA_real_))),
+                      NA_real_)
+disut_sc_lk <- ifelse(LK & !is.na(eq_raw$eq_fo_1),
+                      ifelse(eq_raw$eq_fo_1==1, 0,
+                             ifelse(eq_raw$eq_fo_1==2, 0.119,
+                             ifelse(eq_raw$eq_fo_1==3, 0.337, NA_real_))),
+                      NA_real_)
+disut_ua_lk <- ifelse(LK & !is.na(eq_raw$eq_fo_2),
+                      ifelse(eq_raw$eq_fo_2==1, 0,
+                             ifelse(eq_raw$eq_fo_2==2, 0.071,
+                             ifelse(eq_raw$eq_fo_2==3, -0.419, NA_real_))),
+                      NA_real_)
+disut_pd_lk <- ifelse(LK & !is.na(eq_raw$eq_fo_3),
+                      ifelse(eq_raw$eq_fo_3==1, 0,
+                             ifelse(eq_raw$eq_fo_3==2, 0.057,
+                             ifelse(eq_raw$eq_fo_3==3, 0.300, NA_real_))),
+                      NA_real_)
+disut_ad_lk <- ifelse(LK & !is.na(eq_raw$eq_fo_4),
+                      ifelse(eq_raw$eq_fo_4==1, 0,
+                             ifelse(eq_raw$eq_fo_4==2, 0.044,
+                             ifelse(eq_raw$eq_fo_4==3, 0.194, NA_real_))),
+                      NA_real_)
+
+mo2ua2_lk <- 0.053  * as.numeric(LK & !is.na(eq_raw$eq_fo)   & eq_raw$eq_fo  == 2 &
+                                       !is.na(eq_raw$eq_fo_2) & eq_raw$eq_fo_2== 2)
+mo3sc3_lk <- (-0.182)* as.numeric(LK & !is.na(eq_raw$eq_fo)   & eq_raw$eq_fo  == 3 &
+                                       !is.na(eq_raw$eq_fo_1) & eq_raw$eq_fo_1== 3)
+mo3ua3_lk <- (-0.208)* as.numeric(LK & !is.na(eq_raw$eq_fo)   & eq_raw$eq_fo  == 3 &
+                                       !is.na(eq_raw$eq_fo_2) & eq_raw$eq_fo_2== 3)
+mo3pd3_lk <- (-0.181)* as.numeric(LK & !is.na(eq_raw$eq_fo)   & eq_raw$eq_fo  == 3 &
+                                       !is.na(eq_raw$eq_fo_3) & eq_raw$eq_fo_3== 3)
+mo3ad3_lk <- (-0.113)* as.numeric(LK & !is.na(eq_raw$eq_fo)   & eq_raw$eq_fo  == 3 &
+                                       !is.na(eq_raw$eq_fo_4) & eq_raw$eq_fo_4== 3)
+sc3ua2_lk <- 0.048  * as.numeric(LK & !is.na(eq_raw$eq_fo_1) & eq_raw$eq_fo_1== 3 &
+                                       !is.na(eq_raw$eq_fo_2) & eq_raw$eq_fo_2== 2)
+ua3pd3_lk <- 0.078  * as.numeric(LK & !is.na(eq_raw$eq_fo_2) & eq_raw$eq_fo_2== 3 &
+                                       !is.na(eq_raw$eq_fo_3) & eq_raw$eq_fo_3== 3)
+
+disut_total_lk <- disut_mo_lk + disut_sc_lk + disut_ua_lk + disut_pd_lk + disut_ad_lk +
+                  mo2ua2_lk + mo3sc3_lk + mo3ua3_lk + mo3pd3_lk + mo3ad3_lk +
+                  sc3ua2_lk + ua3pd3_lk
+
+# Initialize vector and fill only LK rows
+eq_index_lk <- rep(NA_real_, nrow(eq_raw))
+
+eq_index_lk[LK_idx] <- 1 - 0.152 - disut_total_lk[LK_idx]
+
+eq_index_lk[intersect(LK_idx, which(is_11111(eq_raw)))] <- 1
+
+eq_new[LK_idx, "eq_5d_3l"] <- round(eq_index_lk[LK_idx], 3)
+
+# ---------------
+# Set to 0 if died prior to day 28 OR func_status_fo == 2
+other_eq_condition <- (eq_raw$sub_died_pri_day28 == 1) | (eq_raw$func_status_fo == 2)
+eq_new[other_eq_condition, "eq_5d_3l"] <- 0
+
+# ===========
+# FBIS
+eq_new[which(eq_condition), "fbis_score"] <- eq_raw[which(eq_condition), "fbis_score"]
+eq_new[which(other_eq_condition), "fbis_score"] <- 0
+
+#
+eq_new <- as.data.frame(eq_new)
+
+#####
+# Discharge
+del_data_3 <- c("redcap_event_name", "redcap_repeat_instrument", 
+                "redcap_repeat_instance", "f03_infection_hospital_outcome_complete")
+
+del_data_3_index <- which(names(data[[3]]) %in% del_data_3)
+# d28
+data_4 <- c("recordid", "d28_date", "d28_status", "d28_death_date")
+data_4_index <- which(names(data[[4]]) %in% data_4)
+# mv,icu,readmission
+del_data_7 <- c("redcap_event_name", "redcap_repeat_instrument",
+                "redcap_repeat_instance", "f07c_admission_progress_complete")
+del_data_7_index <- which(names(data[[7]]) %in% del_data_7)
+
+#####
+# Merge all into one dataframe
+add_list <- list(df_baseline, 
+                 data[[3]][, -del_data_3_index], 
+                 data[[4]][, data_4_index], 
+                 data[[7]][, -del_data_7_index], 
+                 sofa_new, 
+                 severity_new, 
+                 eq_new, 
+                 pitt_new[, c("recordid", "pitt_score", "qpitt_score", "UTI_source")],
+                 spec_date_index)
+
+df_baseline_all <- reduce(add_list, left_join, by = "recordid") 
+
+# Trans "" to NA
+df_baseline_all[df_baseline_all == ""] <- NA
+#
+df_baseline_all <- as.data.frame(df_baseline_all)
+#####
+# Generate new variables 
+###
+# mortality (final status)
+# ho_dischargestatus == [DEAD or MORIBUND (Discharged to die at home)]
+# sub_died_pri_day28 == 1
+##
+# mortality date (form ho_discharge_date or d28_death_date, on day 28 from the last
+# infection onset)
+###
+# first 28 status (within 28 days after index infection onset)
+# first28_date (onset_date + 28 days)
+# first28_observed_date (compare first28_date and mortality date, chose the earlier)
+# first28_death (death_date - onset_date) 
+# first28_patient_days (for standardized rate)
+###
+# length before infection onset
+#####
+df_mortality <- matrix(NA, nrow = nrow(df_baseline_all), ncol = 4)
+colnames(df_mortality) <- c("recordid", "mortality", "mortality_date", "first28_date")
+
+# recordid
+df_mortality[, "recordid"] <- df_baseline_all$recordid
+
+# "mortality" and "mortality_date"
+system.time({
+  condition1 <- df_baseline_all$ho_dischargestatus %in% c("DEAD", "MORIBUND")
+  condition2 <- df_baseline_all$sub_died_pri_day28 == 1
+  condition3 <- df_baseline_all$ho_dischargestatus %in% c("ALIVE", "LAMA")
+
+  all_na <- is.na(df_baseline_all$ho_dischargestatus) & is.na(df_baseline_all$sub_died_pri_day28)
+
+  df_mortality[, "mortality"] <- ifelse(
+    condition1 | condition2,
+    1,
+    ifelse(all_na, NA, 0)
+  )
+
+  mortality_rows <- which(df_mortality[, "mortality"] == 1)
+
+  for (i in mortality_rows) {
+    if (!is.na(df_baseline_all$ho_discharge_date[i]) & !is.na(df_baseline_all$d28_death_date[i])) {
+      df_mortality[i, "mortality_date"] <- as.character(df_baseline_all$d28_death_date[i])
+    } else if (!is.na(df_baseline_all$d28_death_date[i])) {
+      df_mortality[i, "mortality_date"] <- as.character(df_baseline_all$d28_death_date[i])
+    } else if (!is.na(df_baseline_all$ho_discharge_date[i])) {
+      df_mortality[i, "mortality_date"] <- as.character(df_baseline_all$ho_discharge_date[i])
+    } else if ((condition3[i] || condition2[i]) & !is.na(df_baseline_all$d28_death_date[i])) {
+      df_mortality[i, "mortality_date"] <- as.character(df_baseline_all$d28_death_date[i])
+    } else {
+      df_mortality[i, "mortality_date"] <- NA
+    }
+  }
+})
+
+# "first28_date"
+df_baseline_all$inf_onset <- as.Date(df_baseline_all$inf_onset, format="%Y-%m-%d")
+df_mortality[, "first28_date"] <- as.character(df_baseline_all$inf_onset + 28)
+
+# 
+df_mortality <- as.data.frame(df_mortality)
+
+df_mortality[, "mortality_date"] <- as.Date(df_mortality[, "mortality_date"], format="%Y-%m-%d")
+df_mortality[, "first28_date"] <- as.Date(df_mortality[, "first28_date"])
+
+# "first28_observed_date", "first28_death", "first28_patient_days", "length_before_onset"
+df_mortality <- df_mortality %>%
+  mutate(
+    first28_observed_date = case_when(
+      is.na(mortality_date) ~ first28_date,
+      TRUE ~ pmin(first28_date, mortality_date)
+    ),
+    first28_death = case_when(
+      first28_observed_date == mortality_date ~ 1,
+      !is.na(first28_observed_date) ~ 0,
+      TRUE ~ NA_integer_
+    ),
+    first28_patient_days = as.numeric(first28_observed_date - df_baseline_all$inf_onset),
+    length_before_onset = as.numeric(df_baseline_all$inf_onset - as.Date(df_baseline_all$hpd_adm_date))
+  )
+
+###
+df_baseline_all <- left_join(df_baseline_all, df_mortality, by = "recordid")
+
+###
+## length(mv, ICU, readmission) during the follow-up 28 days since index infection onset 
+# Function to determine from which group to start calculation
+determine_start_group <- function(start_dates, end_dates, inf_onset) {
+  inf_onset_date <- as.Date(inf_onset, format="%Y-%m-%d")
+  for (i in seq_along(end_dates)) {
+    start_date <- as.Date(start_dates[[i]], format="%Y-%m-%d")
+    end_date <- as.Date(end_dates[[i]], format="%Y-%m-%d")
+    if (!is.na(start_date) && !is.na(end_date) && !is.na(inf_onset_date) &&
+        start_date < (inf_onset_date + 28) && end_date > inf_onset_date) {
+      return(i)
+    }
+  }
+  return(NA_integer_)
+}
+
+# Define a function to calculate durations and convert character to Date
+calculate_durations <- function(start_dates, end_dates) {
+  durations <- map2_dbl(start_dates, end_dates, ~ {
+    if (is.na(.x) | is.na(.y)) {
+      return(NA_real_)
+    } else {
+      return(as.numeric(.y - .x))
+    }
+  })
+  durations
+}
+
+# Define a function to calculate total duration with the specific NA handling logic from a specified group
+calculate_total_duration <- function(start_dates, end_dates, group_to_use) {
+  if (is.na(group_to_use)) {
+    return(NA_real_)
+  }
+  total_duration <- 0
+  for (i in group_to_use:length(start_dates)) {
+    if (!is.na(start_dates[i]) && !is.na(end_dates[i])) {
+      total_duration <- total_duration + as.numeric(end_dates[i] - start_dates[i])
+    }
+  }
+  total_duration
+}
+
+#
+df_baseline_all <- df_baseline_all %>%
+  rowwise() %>%
+  mutate(
+    start_dates_mv = list(as.Date(unlist(dplyr::c_across(starts_with("mv_ap_") & ends_with("_2"))), format="%Y-%m-%d")),
+    end_dates_mv = list(as.Date(unlist(dplyr::c_across(starts_with("mv_ap_") & ends_with("_3"))), format="%Y-%m-%d")),
+    group_to_use_mv = determine_start_group(start_dates_mv, end_dates_mv, inf_onset),
+    total_mv = calculate_total_duration(start_dates_mv, end_dates_mv, group_to_use_mv),
+    
+    start_dates_icu = list(as.Date(unlist(dplyr::c_across(starts_with("icu_hd_ap_") & ends_with("_2"))), format="%Y-%m-%d")),
+    end_dates_icu = list(as.Date(unlist(dplyr::c_across(starts_with("icu_hd_ap_") & ends_with("_3"))), format="%Y-%m-%d")),
+    group_to_use_icu = determine_start_group(start_dates_icu, end_dates_icu, inf_onset),
+    total_icu = calculate_total_duration(start_dates_icu, end_dates_icu, group_to_use_icu)
+  ) %>%
+  mutate(
+    across(starts_with("mv_ap_") & ends_with("_2"), ~ as.Date(.x, format="%Y-%m-%d")),
+    across(starts_with("mv_ap_") & ends_with("_3"), ~ as.Date(.x, format="%Y-%m-%d")),
+    across(starts_with("icu_hd_ap_") & ends_with("_2"), ~ as.Date(.x, format="%Y-%m-%d")),
+    across(starts_with("icu_hd_ap_") & ends_with("_3"), ~ as.Date(.x, format="%Y-%m-%d")),
+    across(starts_with("readm_ap_") & ends_with("_2"), ~ as.Date(.x, format="%Y-%m-%d")),
+    across(starts_with("readm_ap_") & ends_with("_3"), ~ as.Date(.x, format="%Y-%m-%d"))
+  ) %>%
+  ungroup()
+
+###
+first28_progress <- matrix(NA, nrow = nrow(df_baseline_all), ncol = 4)
+colnames(first28_progress) <- c("max_mv", "max_icu", "first28_mv", "first28_icu")
+
+# before & after
+system.time({
+  for (i in 1:nrow(df_baseline_all)) {
+    group_to_use_mv <- df_baseline_all$group_to_use_mv[i]
+    if (!is.na(group_to_use_mv)) {
+      mv_cols <- grep("^mv_ap_.*_2$", names(df_baseline_all))
+      start_date_mv <- as.Date(unlist(df_baseline_all[i, mv_cols]))[group_to_use_mv]
+      inf_onset_date <- as.Date(df_baseline_all$inf_onset[i])
+      if (!is.na(start_date_mv) && !is.na(inf_onset_date)) {
+        if (start_date_mv <= inf_onset_date) {
+          first28_progress[i, "max_mv"] <- as.numeric(inf_onset_date - start_date_mv) + 28
+        } else {
+          first28_progress[i, "max_mv"] <- 28 - as.numeric(start_date_mv - inf_onset_date)
+        }
+      } else {
+        first28_progress[i, "max_mv"] <- NA
+      }
+    }
+  }
+})
+
+# 
+system.time({
+  for (i in 1:nrow(df_baseline_all)) {
+    group_to_use_mv <- df_baseline_all$group_to_use_mv[i]
+    if (!is.na(group_to_use_mv)) {
+      mv_cols <- grep("^mv_ap_.*_2$", names(df_baseline_all))
+      start_date_mv <- as.Date(unlist(df_baseline_all[i, mv_cols]))[group_to_use_mv]
+      inf_onset_date <- as.Date(df_baseline_all$inf_onset[i])
+      total_mv <- df_baseline_all$total_mv[i]
+      if (!is.na(start_date_mv) && !is.na(inf_onset_date) && !is.na(total_mv)) {
+        if ((start_date_mv <= inf_onset_date) & (first28_progress[i, "max_mv"] >= total_mv)) {
+          first28_progress[i, "first28_mv"] <- total_mv - as.numeric(inf_onset_date - start_date_mv)
+        } else if ((start_date_mv <= inf_onset_date) & (first28_progress[i, "max_mv"] < total_mv)) {
+          first28_progress[i, "first28_mv"] <- 28
+        } else if ((start_date_mv > inf_onset_date) & (first28_progress[i, "max_mv"] >= total_mv)) {
+          first28_progress[i, "first28_mv"] <- total_mv
+        } else if ((start_date_mv > inf_onset_date) & (first28_progress[i, "max_mv"] < total_mv)) {
+          first28_progress[i, "first28_mv"] <- 28 - as.numeric(start_date_mv - inf_onset_date)
+        } else {
+          first28_progress[i, "first28_mv"] <- NA
+        }
+      } else {
+        first28_progress[i, "first28_mv"] <- NA
+      }
+    }
+  }
+})
+
+# Adding ICU Data
+system.time({
+  for (i in 1:nrow(df_baseline_all)) {
+    group_to_use_icu <- df_baseline_all$group_to_use_icu[i]
+    if (!is.na(group_to_use_icu)) {
+      icu_cols <- grep("^icu_hd_ap_.*_2$", names(df_baseline_all))
+      start_date_icu <- as.Date(unlist(df_baseline_all[i, icu_cols]))[group_to_use_icu]
+      inf_onset_date <- as.Date(df_baseline_all$inf_onset[i])
+      if (!is.na(start_date_icu) && !is.na(inf_onset_date)) {
+        if (start_date_icu <= inf_onset_date) {
+          first28_progress[i, "max_icu"] <- as.numeric(inf_onset_date - start_date_icu) + 28
+        } else {
+          first28_progress[i, "max_icu"] <- 28 - as.numeric(start_date_icu - inf_onset_date)
+        }
+      } else {
+        first28_progress[i, "max_icu"] <- NA
+      }
+    }
+  }
+})
+
+system.time({
+  for (i in 1:nrow(df_baseline_all)) {
+    group_to_use_icu <- df_baseline_all$group_to_use_icu[i]
+    if (!is.na(group_to_use_icu)) {
+      icu_cols <- grep("^icu_hd_ap_.*_2$", names(df_baseline_all))
+      start_date_icu <- as.Date(unlist(df_baseline_all[i, icu_cols]))[group_to_use_icu]
+      inf_onset_date <- as.Date(df_baseline_all$inf_onset[i])
+      total_icu <- df_baseline_all$total_icu[i]
+      if (!is.na(start_date_icu) && !is.na(inf_onset_date) && !is.na(total_icu)) {
+        if ((start_date_icu <= inf_onset_date) & (first28_progress[i, "max_icu"] >= total_icu)) {
+          first28_progress[i, "first28_icu"] <- total_icu - as.numeric(inf_onset_date - start_date_icu)
+        } else if ((start_date_icu <= inf_onset_date) & (first28_progress[i, "max_icu"] < total_icu)) {
+          first28_progress[i, "first28_icu"] <- 28
+        } else if ((start_date_icu > inf_onset_date) & (first28_progress[i, "max_icu"] >= total_icu)) {
+          first28_progress[i, "first28_icu"] <- total_icu
+        } else if ((start_date_icu > inf_onset_date) & (first28_progress[i, "max_icu"] < total_icu)) {
+          first28_progress[i, "first28_icu"] <- 28 - as.numeric(start_date_icu - inf_onset_date)
+        } else {
+          first28_progress[i, "first28_icu"] <- NA
+        }
+      } else {
+        first28_progress[i, "first28_icu"] <- NA
+      }
+    }
+  }
+})
+
+df_baseline_all <- df_baseline_all %>%
+  mutate(
+    max_mv = first28_progress[, "max_mv"],
+    first28_mv = first28_progress[, "first28_mv"],
+    max_icu = first28_progress[, "max_icu"],
+    first28_icu = first28_progress[, "first28_icu"]
+  )
+
+# For those without ICU, mv
+update_column <- function(df, condition_col, target_col) {
+  condition <- !is.na(df[[condition_col]]) & is.na(df[[target_col]])
+  df[[target_col]][condition] <- 0
+  return(df)  
+}
+
+#
+df_baseline_all <- update_column(df_baseline_all, "icu_hd_ap", "first28_icu")
+df_baseline_all <- update_column(df_baseline_all, "mv_ap", "first28_mv")
+
+# Length of hospital stay (the first discharge)
+# Earlier date (ho_discharge_date, mortality_date)
+df_baseline_all$first_discharge_date <- pmin(df_baseline_all$ho_discharge_date, df_baseline_all$mortality_date, na.rm = TRUE)
+
+df_baseline_all$first_discharge_date <- as.Date(df_baseline_all$first_discharge_date, format="%Y-%m-%d")
+
+df_baseline_all$first_los <- as.numeric(as.Date(df_baseline_all$first_discharge_date) - as.Date(df_baseline_all$hpd_adm_date))
+
+
+# Delete error data for healthcare-associated BSI
+error_rows <- which(df_baseline_all$infection_types == "Healthcare-associated BSI" & 
+              (df_baseline_all$cmb_overnight_rhc_surgery != "Y" | is.na(df_baseline_all$cmb_overnight_rhc_surgery)))
+
+df_errors_bsi <- df_baseline_all[error_rows, ]
+
+# Delete error BSI
+df_baseline_all <- df_baseline_all[-error_rows, ]
+
+```
+# Microbiology
+```{r}
+#####
+# All episodes
+# Remove unnecessary variables
+del_col_data_2 <- data[[2]] %>% 
+  select(starts_with("antibiotic_"))
+
+del_col_data_2_indices <- which(names(data[[2]]) %in% colnames(del_col_data_2))
+
+all_episode <- data[[2]][,-del_col_data_2_indices]
+# Add organism infection types
+df_baseline_vap <- df_baseline[which(df_baseline$infection_types == "VAP"),]
+df_baseline_bsi <- df_baseline[-which(df_baseline$infection_types == "VAP"),]
+
+df_all_episode <- split(all_episode, all_episode$redcap_event_name)
+
+all_episode_vap <- left_join(df_all_episode$vap_episode_arm_1,
+                             df_baseline_vap, by = "recordid")
+all_episode_bsi <- left_join(df_all_episode$bsi_episode_arm_1,
+                             df_baseline_bsi, by = "recordid")
+all_vap_bsi <- list(all_episode_vap, all_episode_bsi)
+#####
+# Select index episode 
+episode_index <- all_episode[which(data[[2]]$f2_episode_index == 1),]
+df_episode <- split(episode_index, episode_index$redcap_event_name)
+#
+vap_index <- left_join(df_episode$vap_episode_arm_1, df_baseline_vap, by = "recordid")
+bsi_index <- left_join(df_episode$bsi_episode_arm_1, df_baseline_bsi, by = "recordid")
+
+# All index episode
+vap_index <- vap_index[!is.na(vap_index$infection_types), ]
+bsi_index <- bsi_index[!is.na(bsi_index$infection_types), ]
+
+vap_index <- vap_index[which(vap_index$redcap_repeat_instance == 1), ]
+bsi_index <- bsi_index[which(bsi_index$redcap_repeat_instance == 1), ]
+
+# Combine 
+vap_bsi_index <- rbind.data.frame(vap_index, bsi_index)
+```
+# Add age to the AST
+```{r}
+ast_add_age_inf <- df_baseline_all[, c("recordid", "age_new", "infection_types")]
+ast_add_age <- df_baseline_all[, c("recordid", "age_new")]
+
+all_ast_merged <- left_join(all_ast_merged, ast_add_age_inf, by = "recordid")
+all_ast_merged_index <- left_join(all_ast_merged_index, ast_add_age, by = "recordid")
+```
+# Exclude error enrollments
+```{r}
+# BSI exclusion
+bsi_excl_org <- c("Salmonella", "Listeria")
+row_exclude_bsi_ast <- which(all_ast_merged$org_names_all %in% bsi_excl_org & all_ast_merged$infection_types %in% c("Hospital-acquired BSI", "Healthcare-associated BSI"))
+row_exclude_bsi_ast_index <- which(all_ast_merged_index$org_names_all %in% bsi_excl_org & all_ast_merged_index$infection_types %in% c("Hospital-acquired BSI", "Healthcare-associated BSI"))
+
+all_ast_merged_exclude_bsi <- all_ast_merged[row_exclude_bsi_ast,]
+all_ast_merged_index_exclude_bsi <- all_ast_merged_index[row_exclude_bsi_ast_index,]
+
+all_ast_merged <- all_ast_merged[-row_exclude_bsi_ast,]
+all_ast_merged_index <- all_ast_merged_index[-row_exclude_bsi_ast_index,]
+
+bsi_exclude_comm_id <- setdiff(all_ast_merged_exclude_bsi$recordid, all_ast_merged$recordid)
+row_exclude_bis_baseline <- which(df_baseline_all$recordid %in% bsi_exclude_comm_id)
+df_baseline_all_excl_bsi <- df_baseline_all[row_exclude_bis_baseline,]
+df_baseline_all <- df_baseline_all[-row_exclude_bis_baseline,]
+
+# VAP exclusion
+vap_excl_org <- c("S. pneumoniae", "Haemophilus", "Coagulase-negative staphylococci (CoNS)", "Mycobacterium", "Enterococcus spp.")
+row_exclude_vap_ast <- which(all_ast_merged$org_names_all %in% vap_excl_org & all_ast_merged$infection_types == "VAP")
+row_exclude_vap_ast_index <- which(all_ast_merged_index$org_names_all %in% vap_excl_org & all_ast_merged_index$infection_types == "VAP")
+
+all_ast_merged_exclude_vap <- all_ast_merged[row_exclude_vap_ast,]
+all_ast_merged_index_exclude_vap <- all_ast_merged_index[row_exclude_vap_ast_index,]
+
+all_ast_merged <- all_ast_merged[-row_exclude_vap_ast,]
+all_ast_merged_index <- all_ast_merged_index[-row_exclude_vap_ast_index,]
+
+vap_exclude_comm_id <- setdiff(all_ast_merged_exclude_vap$recordid, all_ast_merged$recordid)
+row_exclude_vap_baseline <- which(df_baseline_all$recordid %in% vap_exclude_comm_id)
+df_baseline_all_excl_vap <- df_baseline_all[row_exclude_vap_baseline,]
+df_baseline_all <- df_baseline_all[-row_exclude_vap_baseline,]
+
+```
+# Complete CPIS score for VAP in baseline
+```{r}
+# Culture of TA
+# Combine pathogen_group for each recordid (index)
+cul_data_index <- all_ast_merged_index %>%
+  filter(!is.na(org_names_all)) %>%
+  select(recordid, org_names_all, Class) %>%
+  distinct(recordid, org_names_all, .keep_all = TRUE) %>%
+  group_by(recordid) %>%
+  summarize(org_combined = paste(org_names_all, collapse = ", "),
+            pathogen_group_combined = paste(Class, collapse = ", "),
+            .groups = 'drop') %>%
+  as.data.frame()
+
+# Define a function to sort alphabetically and standardize combinations
+standardize_combination <- function(combination) {
+  elements <- unlist(strsplit(combination, ", "))
+  standardized <- paste(sort(elements), collapse = ", ")
+  return(standardized)
+}
+
+# Apply the function to the pathogen_group_combined column
+cul_data_index$pathogen_group_combined <- sapply(cul_data_index$pathogen_group_combined, standardize_combination)
+
+###
+## Type of pathogen 
+#  Gram-negative only 
+#  Gram-positive only
+#  Gram-negative with fungal
+#  Mixed (GNB + GPB)
+#  Polymicrobial  
+#  Fungal only
+# Define a function to classify the combinations
+classify_combination <- function(combination) {
+  if (is.na(combination)) {
+    return(NA)
+  }
+  if (combination == "GNB") {
+    return("Gram-negative bacteria (GNB)")
+  } else if (combination == "GPB") {
+    return("Gram-positive bacteria (GPB)")
+  } else if (combination == "Fungi") {
+    return("Fungi")
+  } else if (combination == "Fungi, GNB") {
+    return("GNB with fungi")
+  } else if (combination == "Fungi, GPB") {
+    return("GPB with fungi")
+  } else if (combination == "GNB, GPB") {
+    return("Mixed (GNB + GPB)")
+  } else if (combination == "GPB, GPB" || combination == "GNB, GNB") {
+    return("Polymicrobial (2GNB or 2 GPB)")
+  } else {
+    return("Unknown") 
+  }
+}
+
+cul_data_index$pathogen_combined_types_ori <- sapply(cul_data_index$pathogen_group_combined, classify_combination)
+
+# Create a new column with recoded factor levels for pathogen_combined_types
+cul_data_index$pathogen_combined_types <- recode(cul_data_index$pathogen_combined_types_ori,
+  "Fungi" = "Fungi", 
+  "Gram-negative bacteria (GNB)" = "Gram-negative bacteria",
+  "Gram-positive bacteria (GPB)" = "Gram-positive bacteria",
+  .default = "Polymicrobial",
+  .missing = NA_character_
+)
+
+# 
+cul_data_index$pathogen_combined_types <- factor(cul_data_index$pathogen_combined_types,
+  levels = c("Gram-negative bacteria", "Gram-positive bacteria", "Fungi", "Polymicrobial")
+)
+
+###
+all_ast_merged_index <- left_join(all_ast_merged_index, cul_data_index, by = "recordid")
+# 
+cul_data_new_index <- cul_data_index %>%
+  mutate(culture_ta = ifelse(grepl("GPB", pathogen_group_combined, fixed = TRUE), 1, 0))
+
+#
+cpis_new <- as.data.frame(cpis_new)
+cpis_new[,"culture_ta"] <- cul_data_new_index$culture_ta[match(cpis_new$recordid, cul_data_new_index$recordid)]
+
+# Total cpis score
+cpis_items <- c("temperature", "wbc", "tracheal_secretion", 
+                "pa_fi", "pulmonary_radiography", "culture_ta")
+cpis_items_indices <- which(names(cpis_new) %in% cpis_items)
+
+for (i in cpis_items_indices) {cpis_new[, i] = as.numeric(as.character(cpis_new[, i]))}
+
+#
+cpis_new[,"cpis_score"] <- rowSumsWithNA(cpis_new[, cpis_items_indices])
+
+###
+# Add CPIS score into the baseline
+df_baseline_all[, "cpis_score"] <- cpis_new$cpis_score[match(df_baseline_all$recordid, cpis_new$recordid)]
+```
+# Antibiotics
+```{r}
+# Add sepcimen date and infection onset date
+anti_date_add <- list(anti_treat_index, spec_date_index, inf_add)
+anti_treat_index_new_ori <- reduce(anti_date_add, left_join, by = "recordid")
+
+# Add AST result of WHO list
+# Acinetobacter, carbapenem-resistant;
+# Enterobacterales, third-generation cephalosporin-resistant
+# Enterobacterales, carbapenem-resistant
+###
+# Organisms
+anti_treat_index_new_org <- all_ast_merged_index %>% 
+  select("recordid", "org_combined", "pathogen_combined_types") %>%
+  distinct()
+
+anti_treat_index_new_ori <- left_join(anti_treat_index_new_ori, 
+                                      anti_treat_index_new_org, 
+                                      by = "recordid")
+
+# Combine anti_group_pa_ab, anti_group_ent (update anti_group)
+pattern_ent <- paste(ent_spec_org, collapse = "|")
+
+anti_treat_index_new_poly <- anti_treat_index_new_ori %>%
+  mutate(
+    contains_aci = ifelse(str_detect(org_combined, "Acinetobacter spp."), 1, 0),
+    contains_ent = ifelse(str_detect(org_combined, pattern_ent), 1, 0),
+    contains_pse = ifelse(str_detect(org_combined, "Pseudomonas spp."), 1, 0),
+    contains_entc = ifelse(str_detect(org_combined, "Enterococcus spp."), 1, 0),
+    contains_sa = ifelse(str_detect(org_combined, "S. aureus"), 1, 0)
+  ) 
+
+# Included monomicrobial infection
+anti_treat_index_new_mono <- anti_treat_index_new_poly %>%
+  filter(
+    pathogen_combined_types %in% c("Gram-negative bacteria", "Gram-positive bacteria")
+  )
+
+# ------------------------------------------------------------------------------
+# Based on AST results, identify the priority pathogens
+# Carbapenem-resistant Acinetobacter spp. (CRA & CSA)
+id_aci_car_index_r <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Acinetobacter spp." & all_ast_merged_index$ris_Carbapenem == 1]
+id_aci_car_index_s <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Acinetobacter spp." & all_ast_merged_index$ris_Carbapenem %in% c(2:5)]
+
+# Carbapenem-resistant Pseudomonas spp. (CRP & CSP)
+id_pse_car_index_r <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Pseudomonas spp." & all_ast_merged_index$ris_Carbapenem == 1]
+id_pse_car_index_s <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Pseudomonas spp." & all_ast_merged_index$ris_Carbapenem %in% c(2:5)]
+
+# Vancomycin-resistant Enterococcus spp.
+id_entc_van_index_r <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Enterococcus spp." & all_ast_merged_index$Vancomycin == 1]
+id_entc_van_index_s <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "Enterococcus spp." & all_ast_merged_index$Vancomycin %in% c(2:5)]
+
+# Methicillin-resistant Staphylococcus aureus
+id_sa_meth_index_r <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "S. aureus" & all_ast_merged_index$Methicillin == 1]
+id_sa_meth_index_s <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all == "S. aureus" & all_ast_merged_index$Methicillin %in% c(2:5)]
+
+# Enterobacterales
+# CRE
+id_ent_car_index_r <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all %in% ent_spec_org & all_ast_merged_index$ris_Carbapenem == 1]
+
+# 3GCRE
+id_ent_thir_index_r_ori <- all_ast_merged_index$recordid[all_ast_merged_index$org_names_all %in% ent_spec_org & all_ast_merged_index$`ris_Third-generation cephalosporin` == 1]
+
+id_ent_thir_index_r <- setdiff(id_ent_thir_index_r_ori, id_ent_car_index_r)
+
+# CSE & 3GCSE
+id_ent_ast_all <- unique(all_ast_merged_index$recordid[all_ast_merged_index$org_names_all %in% ent_spec_org])
+
+id_ent_thir_index_s <- setdiff(id_ent_ast_all, union(id_ent_car_index_r, id_ent_thir_index_r))
+
+# ----------------------
+new_cols_pothogens <- list(
+  aci_car = expr(case_when(
+    recordid %in% id_aci_car_index_r ~ 1,
+    recordid %in% id_aci_car_index_s ~ 0,
+    TRUE ~ NA_real_
+  )),
+  ent_thir = expr(case_when(
+    recordid %in% id_ent_thir_index_r ~ 1,
+    recordid %in% id_ent_thir_index_s ~ 0,
+    TRUE ~ NA_real_
+  )),
+  ent_car = expr(case_when(
+    recordid %in% id_ent_car_index_r ~ 1,
+    recordid %in% c(id_ent_thir_index_s, id_ent_thir_index_r) ~ 0,
+    TRUE ~ NA_real_
+  )),
+  pse_car = expr(case_when(
+    recordid %in% id_pse_car_index_r ~ 1,
+    recordid %in% id_pse_car_index_s ~ 0,
+    TRUE ~ NA_real_
+  )),
+  entc_van = expr(case_when(
+    recordid %in% id_entc_van_index_r ~ 1,
+    recordid %in% id_entc_van_index_s ~ 0,
+    TRUE ~ NA_real_
+  )),
+  sa_meth = expr(case_when(
+    recordid %in% id_sa_meth_index_r ~ 1,
+    recordid %in% id_sa_meth_index_s ~ 0,
+    TRUE ~ NA_real_
+  )),
+  ent_car_3gcr = expr(case_when(
+    recordid %in% id_ent_car_index_r ~ 2,
+    recordid %in% id_ent_thir_index_r ~ 1,
+    recordid %in% id_ent_thir_index_s ~ 0,
+    TRUE ~ NA_real_
+  ))
+)
+
+# Update anti_treat_index_new with new columns based on the identified categories
+anti_treat_index_new_mono <- anti_treat_index_new_mono %>%
+  mutate(!!!new_cols_pothogens)
+
+anti_treat_index_new_poly <- anti_treat_index_new_poly %>%
+  mutate(!!!new_cols_pothogens)
+
+# Add drug-pathogen combinations to baseline
+df_baseline_all <- df_baseline_all %>%
+  mutate(!!!new_cols_pothogens)
+
+#####
+# Empirical prescriptions
+# Antibiotics were started no more than 24 hours before the onset of infection and 
+# were administered for no longer than 48 hours from the time of infection onset.
+# Definitive prescriptions
+# Antibiotics are given 3-5 days post specimen date.
+###
+process_antibiotic_treatment_data <- function(data, anti_aw_info) {
+  # Empirical prescription period: infection onset -1 to +2 days
+  emp_start_range <- data$inf_onset - days(1)
+  emp_end_range   <- data$inf_onset + days(2)
+  
+  # Flag empirical prescriptions
+  data$emp <- ifelse(emp_start_range <= data$anti_end & emp_end_range >= data$anti_start, 1, 0)
+  
+  # Definitive prescription period: specimen date +3 to +5 days
+  def_start_range <- data$spec_date + days(3)
+  def_end_range   <- data$spec_date + days(5)
+  
+  # Flag definitive prescriptions
+  data$def <- ifelse(def_start_range <= data$anti_end & def_end_range >= data$anti_start, 1, 0)
+  
+  # Join WHO AWaRe category
+  data <- left_join(data, anti_aw_info, by = "anti_names")
+  
+  return(data)
+}
+
+# Add WHO AWaRe category
+anti_aw_info <- anti[, c("anti_names", "WHO_AWaRe")]
+
+anti_treat_index_new_mono <- process_antibiotic_treatment_data(anti_treat_index_new_mono, anti_aw_info)
+anti_treat_index_new_poly <- process_antibiotic_treatment_data(anti_treat_index_new_poly, anti_aw_info)
+
+```
+# Episode for incidence
+```{r}
+df_epi_inc <- data[[2]] %>% 
+  select(recordid, redcap_event_name, redcap_repeat_instance)
+
+episode_for_inc <- left_join(df_epi_inc, df_baseline_all, by = "recordid")
+
+# Find recordid in data[[2]] not in data[[1]] (baseline)
+to_remove <- setdiff(data[[2]]$recordid, data[[1]]$recordid)
+
+# Remove those rows from episode_for_inc
+episode_for_inc <- episode_for_inc %>% 
+  filter(!recordid %in% to_remove)
+
+```
+# Error VAP with fungi
+```{r}
+df_errors_vap <- all_ast_merged_index[which(all_ast_merged_index$pathogen_combined_types == "Fungi" & all_ast_merged_index$infection_types == "VAP"),]
+```
+# Exclude error BSI and VAP with fungi
+```{r}
+# List of dataframes to modify
+df_list <- list(
+  inf_add = inf_add,
+  df_baseline_all = df_baseline_all,
+  all_vap_bsi = all_vap_bsi,
+  vap_bsi_index = vap_bsi_index,
+  all_ast_merged = all_ast_merged,
+  all_ast_merged_index = all_ast_merged_index,
+  anti_treat_index_new = anti_treat_index_new_mono,
+  anti_treat_index_new_poly = anti_treat_index_new_poly,
+  episode_for_inc = episode_for_inc
+)
+
+# Record IDs to exclude
+exclude_ids_vap <- df_errors_vap$recordid
+exclude_ids_bsi <- df_errors_bsi$recordid
+
+exclude_ids_inf_errors <- union(exclude_ids_vap, exclude_ids_bsi)
+
+length(which(df_baseline_all$recordid %in% exclude_ids_inf_errors))
+
+
+# Exclude no infection onset date
+df_baseline_all[df_baseline_all == ""] <- NA
+df_baseline_all_no_inf_date <- df_baseline_all[which(is.na(df_baseline_all$infection_types)),]
+no_inf_date_ids <- df_baseline_all_no_inf_date$recordid
+
+exclude_ids <- union(exclude_ids_inf_errors, no_inf_date_ids)
+
+# Apply filtering only to data.frames
+df_list <- lapply(df_list, function(df) {
+  if (is.data.frame(df)) {
+    df %>% filter(!recordid %in% exclude_ids)
+  } else {
+    df
+  }
+})
+
+# Restore to individual objects
+inf_add <- df_list$inf_add
+df_baseline_all <- df_list$df_baseline_all
+all_vap_bsi <- df_list$all_vap_bsi
+vap_bsi_index <- df_list$vap_bsi_index
+all_ast_merged <- df_list$all_ast_merged
+all_ast_merged_index <- df_list$all_ast_merged_index
+anti_treat_index_new <- df_list$anti_treat_index_new
+anti_treat_index_new_poly <- df_list$anti_treat_index_new_poly
+episode_for_inc <- df_list$episode_for_inc
+```
+# Save
+```{r}
+# Delete testing row
+rows_to_delete <- lapply(
+  list(inf_add, df_baseline_all, all_vap_bsi, vap_bsi_index,
+       all_ast_merged, all_ast_merged_index,
+       anti_treat_index_new, anti_treat_index_new_poly, episode_for_inc),
+  function(x) {
+    rid <- trimws(as.character(x$recordid))
+    which(stringr::str_detect(rid, stringr::regex("test", ignore_case = TRUE)))
+  }
+)
+
+#
+data_frames <- list(inf_add, df_baseline_all,
+                    all_vap_bsi, vap_bsi_index, 
+                    all_ast_merged, all_ast_merged_index,
+                    anti_treat_index_new, anti_treat_index_new_poly,
+                    episode_for_inc)
+#
+for (i in seq_along(data_frames)) {
+  if (length(rows_to_delete[[i]]) > 0) {
+    data_frames[[i]] <- data_frames[[i]][-rows_to_delete[[i]], ]
+  }
+}
+
+# Save
+file_paths <- c(
+  "data/clean data/infection_types_index.RData",
+  "data/clean data/baseline_outcomes_index.RData",
+  "data/clean data/all_vap_bsi.RData",
+  "data/clean data/vap_bsi_index.RData",
+  "data/clean data/ast_all.RData",
+  "data/clean data/ast_all_index.RData",
+  "data/clean data/anti_treat_index.RData",
+  "data/clean data/anti_treat_index_poly.RData",
+  "data/clean data/episode_for_incidence.RData"
+)
+
+#
+for (i in seq_along(data_frames)) {
+  saveRDS(data_frames[[i]], file_paths[i])
+} 
+```
+# Save as excel
+```{r}
+# Data frames to export
+one_sheet_list <- list(
+  inf_add,
+  df_baseline_all,
+  all_ast_merged,
+  all_ast_merged_index,
+  anti_treat_index_new,
+  anti_treat_index_new_poly,
+  episode_for_inc,
+  all_ast_merged_exclude_bsi,
+  all_ast_merged_exclude_vap,
+  all_ast_merged_index_exclude_bsi,
+  all_ast_merged_index_exclude_vap,
+  df_errors_vap,
+  df_errors_bsi
+)
+
+# File paths
+one_sheet_paths <- c(
+  "data/clean_data_excel/infection_types_index.xlsx",
+  "data/clean_data_excel/baseline_outcomes_index.xlsx",
+  "data/clean_data_excel/ast_all.xlsx",
+  "data/clean_data_excel/ast_all_index.xlsx",
+  "data/clean_data_excel/anti_treat_index.xlsx",
+  "data/clean_data_excel/anti_treat_index_poly.xlsx",
+  "data/clean_data_excel/episode_for_incidence.xlsx",
+  "data/check_data/all_ast_merged_exclude_bsi.xlsx",
+  "data/check_data/all_ast_merged_exclude_vap.xlsx",
+  "data/check_data/all_ast_merged_index_exclude_bsi.xlsx",
+  "data/check_data/all_ast_merged_index_exclude_vap.xlsx",
+  "data/check_data/error_vap_fungi.xlsx",
+  "data/check_data/error_bsi.xlsx"
+)
+
+# Fully coerce all columns to character, even numeric and date
+clean_data_frame_to_char <- function(df) {
+  df[] <- lapply(df, function(col) {
+    if (is.list(col)) {
+      sapply(col, function(x) paste(x, collapse = "; "))
+    } else {
+      as.character(col)
+    }
+  })
+  return(df)
+}
+
+# Clean and save
+for (i in seq_along(one_sheet_list)) {
+  cat("Saving to:", one_sheet_paths[i], "\n")
+  df_clean <- clean_data_frame_to_char(one_sheet_list[[i]])
+  write.xlsx(df_clean, one_sheet_paths[i], rowNames = FALSE)
+}
+###
+```
+# For dashboard
+```{r}
+# Retain all patients in each dataset
+# Save data list
+xx_data <- list(
+  enrollment = df_baseline_all,
+  infection = vap_bsi_index,
+  ast_organism_index = all_ast_merged_index,
+  org_anti = anti_treat_index_new
+)
+saveRDS(xx_data, file = "data/clean data/xinxin_data_latest.rds")
+```
