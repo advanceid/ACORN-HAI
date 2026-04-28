@@ -78,8 +78,7 @@ Run the following script to derive resistance indicators from AST data:
 
 This step generates:
 - MDR classification (CMI 2012)
-- Drug-level AMR (excluding intrinsic resistance)
-- Class-level AMR (excluding intrinsic resistance)
+- AMR classification (excluding intrinsic resistance)
 
 The updated dataset will be saved to:
 - `data/clean_data_RData/ast_all_index.RData`
