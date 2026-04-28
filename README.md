@@ -107,7 +107,7 @@ Run the following scripts to create pie charts displaying the proportions of AST
 Run the `descriptive_analysis/heatmap_ast.R` script to generate a heatmap of resistant organism proportions for the index episodes.
 
 #### Antibiotic resistance profiles
-Run the `descriptive_analysis/amr_profiles.R` script to visualize antibiotic resistance profiles across different infection types.
+Run `descriptive_analysis/amr_profiles.R` and `descriptive_analysis/key_pathogens_age_group.R` to visualise antibiotic resistance profiles across infection types and the distribution of key antimicrobial-resistant pathogen groups across age categories.
 
 #### Prescriptions 
 Run the `descriptive_analysis/sankey.R` script to illustrate the transition from empirical to definitive antibiotic prescriptions.
