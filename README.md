@@ -70,15 +70,9 @@ For details on specific variables, refer to the [data directory](https://docs.go
 **Note:** The cleaned data files are ready for analysis in SPSS, STATA, SAS, R, or other statistical software.
 
 #### Step 5: Derive resistance variables
-Antimicrobial resistance (AMR): defined as resistance to at least one tested antimicrobial agent.  
-Multidrug resistance (MDR): defined as resistance to at least one agent in three or more antibiotic classes.
-
-Run the following script to derive resistance indicators from AST data:
-- `class_organism.R`
-
-This step generates:
-- MDR classification (CMI 2012)
-- AMR classification (excluding intrinsic resistance)
+Run `class_organism.R` to derive resistance indicators from AST data:
+- Antimicrobial resistance (AMR): resistance to ≥1 tested antimicrobial agent; intrinsic resistance excluded.
+- Multidrug resistance (MDR): resistance to ≥1 agent in ≥3 antibiotic classes; classified using CMI 2012.
 
 The updated dataset will be saved to:
 - `data/clean_data_RData/ast_all_index.RData`
