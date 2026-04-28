@@ -70,7 +70,7 @@ For details on specific variables, refer to the [data directory](https://docs.go
 **Note:** The cleaned data files are ready for analysis in SPSS, STATA, SAS, R, or other statistical software.
 
 #### Step 5: Derive resistance variables
-Antimicrobial resistance (AMR): defined as resistance to at least one tested antimicrobial agent.
+Antimicrobial resistance (AMR): defined as resistance to at least one tested antimicrobial agent.  
 Multidrug resistance (MDR): defined as resistance to at least one agent in three or more antibiotic classes.
 
 Run the following script to derive resistance indicators from AST data:
