@@ -65,7 +65,7 @@ After cleaning, the following nine Excel files will be available in the `data/cl
   - `vap_bsi_index`: Relevant variables for the index episodes.
   - `df_ast`; `each_ast`: Prepare data for AST visualizations.
 
-For details on specific variables, refer to the [data directory](https://docs.google.com/spreadsheets/d/1qLqACtCwm7IUfF0Fh_TJnrfE94kV-5Dq_Cn5IjIzS9c/edit?gid=766714505#gid=766714505).
+For details on specific variables, refer to the [data directory](https://docs.google.com/spreadsheets/d/1iVH_cxQvOQfDAtir-F-cvjH-oF6nGSXfzFzjp88AxeI/edit?gid=1242078234#gid=1242078234).
 
 **Note:** The cleaned data files are ready for analysis in SPSS, STATA, SAS, R, or other statistical software.
 
