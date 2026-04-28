@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" width="350"/>
+  <img src="logo.png" width="220"/>
 </p>
 
 ---
@@ -8,9 +8,9 @@
 
 ## Introduction
 
-The ACORN-HAI study, a prospective cohort conducted from September 2022 to February 2025, aims to establish a large-scale, multi-center, patient-centered surveillance network focusing on antimicrobial resistance in severe healthcare-associated infections. It also lays the groundwork for future interventional clinical trials targeting multidrug-resistant infections by building microbiology laboratory capacity and developing robust data collection and sharing platforms.
+The ACORN-HAI study, a prospective cohort conducted from September 2022 to December 2024, aims to establish a large-scale, multi-center, patient-centered surveillance network focusing on antimicrobial resistance in severe healthcare-associated infections. It also lays the groundwork for future interventional clinical trials targeting multidrug-resistant infections by building microbiology laboratory capacity and developing robust data collection and sharing platforms.
 
-This README provides a step-by-step guide for conducting the analysis of the ACORN-HAI cohort using R. It covers key aspects such as baseline characteristics, antibiotic resistance, clinical outcomes, and antibiotic prescriptions, particularly highlighting **carbapenem-resistant *Acinetobacter* spp. (CRA)**, **third-generation cephalosporin-resistant Enterobacterales (3GCRE)**, **carbapenem-resistant Enterobacterales (CRE)**, **carbapenem-resistant *Pseudomonas* spp. (CRP)**,**vancomycin-resistant *Enterococcus* spp. (VRE)**, and **methicillin-resistant *Staphylococcus aureus* (MRSA)**. Throughout the guide, you will find explanations, code examples, and the implications of each component.
+This README provides a step-by-step guide for conducting the analysis of the ACORN-HAI cohort using R. It covers key aspects such as baseline characteristics, antibiotic resistance, clinical outcomes, and antibiotic prescriptions, particularly highlighting **Carbapenem-resistant *Acinetobacter* (CRA)**, **Third-generation cephalosporin-resistant *Enterobacterales* (3GCRE)**, and **Carbapenem-resistant *Enterobacterales* (CRE)**. Throughout the guide, you will find explanations, code examples, and the implications of each component.
 
 ---
 
@@ -69,176 +69,97 @@ For details on specific variables, refer to the [data directory](https://docs.go
 
 **Note:** The cleaned data files are ready for analysis in SPSS, STATA, SAS, R, or other statistical software.
 
+#### Step 5: Derive resistance variables
+Antimicrobial resistance (AMR): defined as resistance to at least one tested antimicrobial agent.
+Multidrug resistance (MDR): defined as resistance to at least one agent in three or more antibiotic classes.
+
+Run the following script to derive resistance indicators from AST data:
+- `class_organism.R`
+
+This step generates:
+- MDR classification (CMI 2012)
+- Drug-level AMR (excluding intrinsic resistance)
+- Class-level AMR (excluding intrinsic resistance)
+
+The updated dataset will be saved to:
+- `data/clean_data_RData/ast_all_index.RData`
+- `data/clean_data_excel/ast_all_index.xlsx`
 ---
 
 ### Demographic characteristics and antibiotic resistance profiles
 
 #### Preparing data for visualization  
 To prepare the data for plotting, run the following scripts in your R environment:
-  - `descriptive_analysis/1_data_for_plot_1.R`
-  - `descriptive_analysis/2_data_for_plot_2.R`
+  - `descriptive_analysis/data_for_plot_1.R`
+  - `descriptive_analysis/data_for_plot_2.R`
 
 Each script will generate the data for plotting, with the output saved in `data/clean_data_RData/`.
 
 #### Baseline characteristics 
-Run `descriptive_analysis/3_table_baseline.R` script to generate a baseline characteristics table.
+Run `descriptive_analysis/table_baseline.R` script to generate a baseline characteristics table.
 
-#### Proportions and pathogen distributions across three syndromes
-Run the following scripts to generate and combine the proportion and distribution outputs:
-  - `descriptive_analysis/4_index_pathogen_types_distribution.R`: distributions of pathogen types across the three syndromes.
-  - `descriptive_analysis/5_index_organism_distribution.R`: distributions of specific organisms across the three syndromes.
-  - `descriptive_analysis/6_proportion_index_episodes.R`: proportions of infection types across countries.
-  - `descriptive_analysis/7_combine_distribution_proportion.R`: combines all outputs into a single figure set.
+#### Proportion of infection types
+Run the `descriptive_analysis/proportion_infection_types.R` script to generate proportion of infection types across countries with total index episodes.
 
 #### Stacked charts
-Run the following scripts to generate stacked charts of AST result proportions by antibiotic classes for index episodes:
-  - `descriptive_analysis/8_index_percent_stacked_charts_gnb.R` (Gram-negative bacteria)
-  - `descriptive_analysis/9_index_percent_stacked_charts_gpb_fungi.R` (Gram-positive bacteria and fungi)
+Run the `descriptive_analysis/stacked_charts_ast.R` script to generate stacked charts showing the proportions of  AST results by antibiotic class for the index episodes.
 
 #### Pie charts
 Run the following scripts to create pie charts displaying the proportions of AST results by antibiotics for the index episodes:
-  - `descriptive_analysis/10_pie_charts_ast_VAP.R` for VAP.
-  - `descriptive_analysis/11_pie_charts_ast_BSI_hosp.R` for hospital-acquired BSI.
-  - `descriptive_analysis/12_pie_charts_ast_BSI_health.R` for healthcare-associated BSI.
+  - `descriptive_analysis/pie_charts_ast_VAP.R` for VAP.
+  - `descriptive_analysis/pie_charts_ast_BSI_hosp.R` for hospital-acquired BSI.
+  - `descriptive_analysis/pie_charts_ast_BSI_health.R` for healthcare-associated BSI.
 
 #### Heatmap
-Run the `descriptive_analysis/13_index_heatmap_Resistance.R` script to generate a heatmap of resistant organism proportions for the index episodes.
-
-#### Pie charts
-Run the following scripts to create pie charts displaying the proportions of AST results by antibiotics for the index episodes:
-  - `descriptive_analysis/14_map_top3.R` for CRA, 3GCRE, and CRE.
-  - `descriptive_analysis/15_map_high3.R` for CRP, VRE, and MRSA.
+Run the `descriptive_analysis/heatmap_ast.R` script to generate a heatmap of resistant organism proportions for the index episodes.
 
 #### Antibiotic resistance profiles
-Run the `descriptive_analysis/16_index_resistant_MDRO.R` script to visualize antibiotic resistance profiles across different infection types.
+Run the `descriptive_analysis/amr_profiles.R` script to visualize antibiotic resistance profiles across different infection types.
 
 #### Prescriptions 
-Run the following scripts to illustrate the transition from empirical to definitive antibiotic prescriptions:
-  - `descriptive_analysis/17_sankey_all.R` for all prescriptions.
-  - `descriptive_analysis/18_sankey_others.R` where prescription categories with <5% frequency are grouped as “Others”.
-  - `descriptive_analysis/19_awr.R` for prescriptions classified according to the WHO AWaRe categorization.
+Run the `descriptive_analysis/sankey.R` script to illustrate the transition from empirical to definitive antibiotic prescriptions.
 
 **Note:** Tables are saved in `descriptive_analysis/output/table/`, and figures in `descriptive_analysis/output/figure/`.
 
 ---
 
-### Clinical outcomes
+### Incidence and clinical outcomes
 
 #### Preparing data for analysis
-
-1. Assess the proportion of missing data in key variables.  
-   If the proportion is <10%, exclude observations with missing values and conduct a complete-case analysis by running  
-   `descriptive_analysis/20_missing_data_delete.R`.
-
-2. Create a `data/` folder in each of the following directories:
-   - `outcome_incidence/`
-   - `outcome_all_cause_mortality/`
-   - `outcome_all_cause_readmission/`
+1. **Create `data/` folder** in the following directories:
+   - `incidence/`
    - `outcome_attributable_mortality/`
-   - `outcome_attributable_EQ-5D-3L/`
-   - `outcome_attributable_FBIS/`
-   - `outcome_excess_length_of_stay/`
-   - `outcome_recurrence/`
+   - `outcome_attributable_fbis/`
+   - `outcome_attributable_eq5d/`
 
-   In addition, create a `data/` folder inside the subdirectories of:
-   - `outcome_all_cause_mortality/`  
-     (`overall/`, `subgroups/`)
-   - `outcome_all_cause_readmission/`  
-     (`overall/`, `subgroups/`)
-   - `outcome_attributable_mortality/`  
-     (`overall/`, `infection subgroups/`, `income subgroups/`;  
-     each containing `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`)
-   - `outcome_attributable_EQ-5D-3L/`  
-     (`overall/`, `subgroups/`;  
-     each containing `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`)
-   - `outcome_attributable_FBIS/`  
-     (same subdirectory structure as `outcome_attributable_EQ-5D-3L/`)
-
-3. Copy the entire `data/clean_data_RData/` folder and paste it into each of the outcome directories listed above.
+2. **Copy and paste**:
+   - Copy the entire `data/clean_data_RData/` folder and paste it inside each of the directories listed above.
 
 #### Incidence
-
-- Open the `outcome_incidence/` folder.
-- Run the R scripts in sequence.
-- Tables and figures will be saved in:
-  - `outcome_incidence/output/table/`
-  - `outcome_incidence/output/figure/`
-
-#### All-cause mortality
-
-- Open the `outcome_all_cause_mortality/` folder, which contains:
-  - `overall/`
-  - `subgroups/`
-- Run the R scripts in sequence within each subfolder.
-- Tables and figures will be saved in:
-  - `output/table/`
-  - `output/figure/`
-
-#### All-cause readmission
-
-- Open the `outcome_all_cause_readmission/` folder, which contains:
-  - `overall/`
-  - `subgroups/`
-- Run the R scripts in sequence within each subfolder.
-- Tables and figures will be saved in:
-  - `output/table/`
-  - `output/figure/`
+- Open the `incidence` folder.
+- Run the R scripts step by step.
+- Tables and figures will be saved in `incidence/output/table/` and `incidence/output/figure/` directories.
 
 #### Attributable mortality
-
-- Open the `outcome_attributable_mortality/` folder, which contains:
-  - `overall/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-  - `infection subgroups/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-  - `income subgroups/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-- Run the R scripts in sequence within each subfolder.
-- Tables and figures will be saved in:
-  - `output/table/`
-  - `output/figure/`
-
-#### Attributable EQ-5D-3L
-
-- Open the `outcome_attributable_EQ-5D-3L/` folder, which contains:
-  - `overall/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-  - `subgroups/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-- Run the R scripts in sequence within each subfolder.
-- Tables and figures will be saved in:
-  - `output/table/`
-  - `output/figure/`
+- Open the `outcome_attributable_mortality` folder.
+- Run the R scripts step by step.
+- Tables and figures will be saved in `outcome_attributable_mortality/output/table/` and `outcome_attributable_mortality/output/figure/` directories.
 
 #### Attributable FBIS
+- Open the `outcome_attributable_fbis` folder.
+- Run the R scripts step by step.
+- Tables and figures will be saved in `outcome_attributable_fbis/output/table/` and `outcome_attributable_fbis/output/figure/` directories.
 
-- Open the `outcome_attributable_FBIS/` folder (same structure as EQ-5D-3L), containing:
-  - `overall/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-  - `subgroups/`
-    - organism groups: `1_car_aci/`, `2_thir_ent/`, `3_car_ent/`
-- Run the R scripts in sequence within each subfolder.
-- Tables and figures will be saved in:
-  - `output/table/`
-  - `output/figure/`
-
-#### Excess length of stay
-
-- Open the `outcome_excess_length_of_stay/` folder.
-- Run the R scripts in sequence.
-- Tables and figures will be saved in:
-  - `outcome_excess_length_of_stay/output/table/`
-  - `outcome_excess_length_of_stay/output/figure/`
-
-#### Recurrence
-
-- Open the `outcome_recurrence/` folder.
-- Run the R scripts in sequence.
-- Tables and figures will be saved in:
-  - `outcome_recurrence/output/table/`
-  - `outcome_recurrence/output/figure/`
+#### Attributable EQ-5D-3L
+- Open the `outcome_attributable_eq5d` folder.
+- Run the R scripts step by step.
+- Tables and figures will be saved in `outcome_attributable_eq5d/output/table/` and `outcome_attributable_eq5d/output/figure/` directories.
 
 ---
 
 ### Troubleshooting
 For any issues with code execution, please contact Xinxin (xx_hao@nus.edu.sg).
+
+--- 
+
+
