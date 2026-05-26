@@ -1,0 +1,1 @@
+Scripts and outputs for EQ-5D-3L health-related quality of life analyses in the ACORN-HAI study.
